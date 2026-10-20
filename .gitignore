@@ -1,3 +1,9 @@
 .vs
 /PCL/
 /PCL-Down.7d1f8c8c/
+/x64/
+/Debug/
+/Release/
+/obj/
+/tests/snapshot/
+/tests/output/

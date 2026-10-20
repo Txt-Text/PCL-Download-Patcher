@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="PCL-Download-Fixer.vcxproj" />
+  <Project Path="PCL-Download-Patcher.vcxproj" Id="7d1f8c8c-f1ff-45ba-a140-fb9584685daa" />
 </Solution>

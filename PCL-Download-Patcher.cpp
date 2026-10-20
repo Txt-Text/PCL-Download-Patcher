@@ -13,10 +13,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <cctype>
 #include <iterator>
 #include <cstring>
-#include <cwctype>
 #include "ManagedPatch.h"
 
 #pragma comment(lib, "Comdlg32.lib")
@@ -191,7 +189,7 @@ namespace {
         static bool CanPatch(const FileInfo& info, const Console& console) {
             const auto analysis = PclFix::ManagedPatch::Analyze(info.path);
             if (!analysis.error.empty()) { console.Line("[-] " + analysis.error, Color::Red); return false; }
-            if (analysis.ranges.empty()) { console.Line("[+] 下载页面已绑定正常加载器，无需重复修补。", Color::Green); return false; }
+            if (analysis.ranges.empty()) { console.Line("[+] 下载页面正常，无需重复修补。", Color::Green); return false; }
             console.Line("[+] 已定位可恢复的下载页面：" + std::to_string(analysis.ranges.size()), Color::Green);
             return true;
         }
@@ -229,7 +227,7 @@ namespace {
             if (!success) { std::error_code error; Fs::remove(temporary, error); console.Line("[-] 修补或临时文件复检失败，目标未替换。", Color::Red); return false; }
             const auto finalCheck = PclFix::ManagedPatch::Analyze(info.path);
             success = finalCheck.error.empty() && finalCheck.ranges.empty() && finalCheck.restoredPages == verified.restoredPages;
-            console.Line(success ? "[+] 修补完成，正常下载加载器绑定复检通过。" : "[-] 替换后的复检失败，请使用备份还原。", success ? Color::Green : Color::Red);
+            console.Line(success ? "[+] 修补与复检完成。" : "[-] 替换后复检失败，请使用备份还原。", success ? Color::Green : Color::Red);
             return success;
         }
     };
@@ -328,8 +326,6 @@ namespace {
     class Application {
     private:
         Console m_console; // 负责控制台颜色、UTF-8 输出和无回显按键读取。
-        Fs::path m_root; // 工具程序所在目录，也是默认扫描目录。
-        Fs::path m_self; // GetModuleFileNameW 获取的自身路径，改名后仍可排除。
 
         void Pause() const {
             m_console.Line("[=] 按任意键返回。", Color::Orange);
@@ -337,17 +333,14 @@ namespace {
         }
 
         void Header() const {
-            m_console.Line("==========================="); m_console.Line("");
-            m_console.Line("PCL Download Patcher v1.0"); m_console.Line("Author: Txt_Text");
-            m_console.Line("本工具完全免费开源！"); m_console.Line("我的GitHub链接："); m_console.Line("");
+            m_console.Line("==========================="); 
+            m_console.Line("");
+            m_console.Line("PCL Download Patcher v1.0"); 
+            m_console.Line("Author: Txt_Text");
+            m_console.Line("");
+            m_console.Line("本工具完全免费开源！项目 GitHub 链接：https://github.com/Txt-Text/PCL-Download-Patcher"); 
+            m_console.Line("");
             m_console.Line("===========================");
-        }
-
-        Fs::path GetApplicationDirectory() const {
-            wchar_t executablePath[32768]{};
-            const DWORD length = GetModuleFileNameW(nullptr, executablePath, static_cast<DWORD>(std::size(executablePath)));
-            if (length == 0 || length >= std::size(executablePath)) return Fs::current_path();
-            return Fs::path(executablePath).parent_path();
         }
 
         int Menu(const std::vector<std::string>& items) const {
@@ -367,67 +360,21 @@ namespace {
             }
         }
 
-        std::vector<Fs::path> Discover() const {
-            std::vector<Fs::path> result;
-            for (const auto& entry : Fs::directory_iterator(m_root)) {
-                if (!entry.is_regular_file()) continue;
-                std::error_code identityError;
-                if (Fs::equivalent(entry.path(), m_self, identityError)) continue;
-                std::wstring extension = entry.path().extension().wstring();
-                std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t value) { return static_cast<wchar_t>(std::towlower(value)); });
-                if (extension != L".exe") continue;
-                std::wstring upper = entry.path().filename().wstring();
-                std::transform(upper.begin(), upper.end(), upper.begin(), [](wchar_t value) { return static_cast<wchar_t>(std::towupper(value)); });
-                if (upper.find(L"PCL") == std::wstring::npos && upper.find(L"PLAIN CRAFT LAUNCHER") == std::wstring::npos) continue;
-                result.push_back(entry.path());
-            }
-            return result;
-        }
-
+        // 打开系统文件选择窗口；取消时直接返回上级菜单，不改动任何文件。
         std::optional<Fs::path> PickFile() const {
-            wchar_t filename[32768]{}; OPENFILENAMEW dialog{}; dialog.lStructSize = sizeof(dialog);
+            wchar_t filename[32768]{}; // 接收用户选中的完整文件路径。
+            OPENFILENAMEW dialog{}; // 系统文件选择窗口的配置与返回状态。
+            dialog.lStructSize = sizeof(dialog);
             dialog.lpstrFilter = L"可执行文件 (*.exe)\0*.exe\0所有文件 (*.*)\0*.*\0"; dialog.lpstrFile = filename; dialog.nMaxFile = static_cast<DWORD>(std::size(filename));
-            dialog.lpstrInitialDir = m_root.c_str();
-            dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            dialog.hwndOwner = GetConsoleWindow(); // 文件选择窗口归属于当前控制台。
+            dialog.lpstrTitle = L"请选择 PCL 可执行文件";
+            dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
             return GetOpenFileNameW(&dialog) ? std::optional<Fs::path>(filename) : std::nullopt;
         }
 
-        int SelectFile(const std::vector<Fs::path>& files) const {
-            size_t selected = 0;
-            while (true) {
-                system("cls"); Header(); m_console.Line("发现目录下存在PCL文件，请选择：");
-                for (size_t index = 0; index <= files.size(); ++index) {
-                    const bool highlighted = index == selected;
-                    m_console.Write(highlighted ? "> " : "  ", highlighted ? Color::Yellow : Color::White);
-                    if (index == files.size()) m_console.Line("0.手动选择文件", highlighted ? Color::Yellow : Color::White);
-                    else m_console.Line(std::to_string(index + 1) + "." + PathToUtf8(files[index].filename()), highlighted ? Color::Yellow : Color::White);
-                }
-                m_console.Line("-----------");
-                m_console.Line("[↑] 上一个选项 | [↓] 下一个选项 | [Enter] 确认 | [ESC] 返回", Color::Orange);
-                const int key = m_console.ReadKey();
-                if (key == 256 + 72 || key == 256 + 75) selected = selected == 0 ? files.size() : selected - 1;
-                else if (key == 256 + 80 || key == 256 + 77) selected = (selected + 1) % (files.size() + 1);
-                else if (key == 13 || (key >= '0' && key <= '9')) {
-                    if (key >= '0' && key <= '9') {
-                        const size_t requested = key == '0' ? files.size() : static_cast<size_t>(key - '1');
-                        if (requested <= files.size()) selected = requested;
-                        else continue;
-                    }
-                    return static_cast<int>(selected);
-                }
-                else if (key == 27) return -1;
-            }
-        }
-
         void PatchPcl() {
-            const auto files = Discover(); std::optional<Fs::path> selected;
             system("cls"); Header();
-            if (files.empty()) { m_console.Line("[-] 未识别到目录下存在PCL文件。", Color::Red); selected = PickFile(); }
-            else {
-                const int choice = SelectFile(files);
-                if (choice >= 0 && choice < static_cast<int>(files.size())) selected = files[choice];
-                else if (choice == static_cast<int>(files.size())) selected = PickFile();
-            }
+            const auto selected = PickFile(); // 直接由用户选择目标，不枚举程序目录。
             if (!selected) return;
             const auto info = PeScanner::Scan(*selected);
             if (!info.validPe) { m_console.Line("[-] PE头校验错误，这不是一个有效的EXE文件。", Color::Red); Pause(); return; }
@@ -461,14 +408,7 @@ namespace {
         void BackupRestore() {
             const int operation = Menu({"备份PCL", "还原PCL", "返回"});
             if (operation < 0 || operation == 2) return;
-            const auto files = Discover();
-            std::optional<Fs::path> selected; // 自动扫描与手动选择共用后续校验。
-            if (files.empty()) { m_console.Line("[-] 未识别到目录下存在PCL文件。", Color::Red); selected = PickFile(); }
-            else {
-                const int choice = SelectFile(files);
-                if (choice >= 0 && choice < static_cast<int>(files.size())) selected = files[choice];
-                else if (choice == static_cast<int>(files.size())) selected = PickFile();
-            }
+            const auto selected = PickFile(); // 备份与还原同样只使用文件选择窗口。
             if (!selected) return;
             const auto info = PeScanner::Scan(*selected);
             // 还原时允许当前 EXE 损坏；需要校验的是待恢复的备份。
@@ -485,16 +425,9 @@ namespace {
         }
 
     public:
-        Application() : m_root(GetApplicationDirectory()) {
-            wchar_t executablePath[32768]{};
-            const DWORD length = GetModuleFileNameW(nullptr, executablePath, static_cast<DWORD>(std::size(executablePath)));
-            if (!length || length >= std::size(executablePath)) throw std::runtime_error("无法获取工具自身路径。");
-            m_self = Fs::path(executablePath);
-        }
-
         int Run() {
             SetConsoleOutputCP(CP_UTF8);
-            while (true) { const int choice = Menu({"修补PCL", "备份并还原PCL"}); if (choice < 0) return 0; if (choice == 0) PatchPcl(); else BackupRestore(); }
+            while (true) { const int choice = Menu({"修补PCL", "备份与还原PCL"}); if (choice < 0) return 0; if (choice == 0) PatchPcl(); else BackupRestore(); }
         }
     };
 }

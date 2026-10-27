@@ -9,6 +9,9 @@
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
     </Filter>
+    <Filter Include="头文件\Features">
+      <UniqueIdentifier>{AC42CBDA-7559-4A35-AABF-770604891977}</UniqueIdentifier>
+    </Filter>
     <Filter Include="资源文件">
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
@@ -22,6 +25,72 @@
   <ItemGroup>
     <ClInclude Include="ManagedPatch.h">
       <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ManagedPatchContext.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PatchTypes.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ManagedRewrite.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ManagedResources.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\IPatchFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\PatchFeatureRegistry.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\DownloadPageLoaderFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\ModpackPickerFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\ModpackDispatcherFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\ModifyMinecraftCardFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\ResourceInstallFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="TargetVersion.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PatchRuleCatalog.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\DisabledModDownloadFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\DownloadNavigationFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\DownloadVisibilityCode.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\EmptyListDownloadFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\LaunchDownloadFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\MethodPatchFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\ModpackImportFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\ModpackSearchFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\UpdateDownloadFeature.hpp">
+      <Filter>头文件\Features</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

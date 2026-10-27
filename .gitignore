@@ -5,5 +5,5 @@
 /Debug/
 /Release/
 /obj/
-/tests/snapshot/
-/tests/output/
+/build/
+/tests/

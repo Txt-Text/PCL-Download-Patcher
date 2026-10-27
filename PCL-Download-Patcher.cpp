@@ -20,6 +20,9 @@
 #pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "Bcrypt.lib")
 
+#define PCL_DOWNLOAD_PATCHER_VERSION "v1.1.0"
+#define PCL_DOWNLOAD_PATCHER_AUTHOR "Txt_Text"
+
 namespace {
     namespace Fs = std::filesystem;
 
@@ -32,19 +35,11 @@ namespace {
         return result;
     }
 
-    enum class Color : WORD {
-        White = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE,
-        Green = FOREGROUND_GREEN | FOREGROUND_INTENSITY,
-        Red = FOREGROUND_RED | FOREGROUND_INTENSITY,
-        Yellow = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY,
-        Orange = FOREGROUND_RED | FOREGROUND_GREEN
-    };
-
     class Console {
     private:
-        HANDLE m_handle; // 借用标准输出句柄，不负责关闭。
-        WORD m_defaultColor; // 控制台原来的文字颜色。
-        DWORD m_originalMode = 0; // 退出时恢复的原控制台模式。
+        HANDLE m_handle;                // 借用标准输出句柄，不负责关闭。
+        WORD m_defaultColor;            // 控制台原来的文字颜色。
+        DWORD m_originalMode = 0;       // 退出时恢复的原控制台模式。
         bool m_virtualTerminal = false; // 是否支持 RGB 橙色转义序列。
 
     public:
@@ -59,28 +54,88 @@ namespace {
         Console(const Console&) = delete;
         Console& operator=(const Console&) = delete;
 
-        void Write(const std::string& text, Color color = Color::White) const {
-            SetConsoleTextAttribute(m_handle, static_cast<WORD>(color));
-            const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
-            if (length > 0) {
-                std::wstring wide(static_cast<size_t>(length), L'\0');
-                MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), length);
-                DWORD mode = 0;
-                if (GetConsoleMode(m_handle, &mode)) {
-                    // Win32 的 16 色调色板没有橙色，支持 VT 时使用 RGB。
-                    if (color == Color::Orange && m_virtualTerminal) wide = L"\x1b[38;2;255;165;0m" + wide + L"\x1b[0m";
-                    DWORD written = 0;
-                    WriteConsoleW(m_handle, wide.data(), static_cast<DWORD>(wide.size()), &written, nullptr);
-                } else {
-                    DWORD written = 0;
-                    WriteFile(m_handle, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
-                }
+        // 颜色类型
+        enum class Color : WORD {
+            None = 0xffff,   // 无颜色，用于控制台打印函数判断是否要使用默认颜色
+            Gray = FOREGROUND_INTENSITY, // 调试消息使用灰色。
+            White = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE,
+            Green = FOREGROUND_GREEN | FOREGROUND_INTENSITY,
+            Red = FOREGROUND_RED | FOREGROUND_INTENSITY,
+            Yellow = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY,
+            Orange = FOREGROUND_RED | FOREGROUND_GREEN
+        };
+
+        // 日志等级
+        enum class Level {
+            None,    // 纯消息，无前缀
+            Info,    // 普通消息，白色 [=]
+            Warn,    // 警告信息，黄色 [!]
+            Error,   // 错误信息，红色 [-]
+            Success, // 成功信息，绿色 [+]
+            Debug    // 调试信息，灰色 [#]
+        };
+
+        // 获取日志等级对应的颜色
+        static Color GetLevelColor(Level level) {
+            switch (level) {
+            case Level::None:
+                return Color::White;
+            case Level::Info:
+                return Color::White;
+            case Level::Warn:
+                return Color::Yellow;
+            case Level::Error:
+                return Color::Red;
+            case Level::Success:
+                return Color::Green;
+            case Level::Debug:
+                return Color::Gray;
             }
+            return Color::White; // 未知等级按普通消息显示。
+        }
+
+        // 获取日志等级对应的前缀字符串
+        static std::string GetLevelPrefix(Level level) {
+            switch (level) {
+            case Level::None:
+                return "";
+            case Level::Info:
+                return "[=]";
+            case Level::Warn:
+                return "[!]";
+            case Level::Error:
+                return "[-]";
+            case Level::Success:
+                return "[+]";
+            case Level::Debug:
+                return "[#]";
+            }
+            return ""; // 未知等级不添加前缀。
+        }
+
+        // 不换行的打印函数
+        void Write(const std::string& text, Level level = Level::None, Color color = Color::None) const {
+
+            // 显式颜色优先；未指定颜色时使用日志等级的默认颜色。
+            const Color effectiveColor = color == Color::None ? GetLevelColor(level) : color;
+            const std::string prefix = GetLevelPrefix(level); // 无等级消息不加前缀及空格。
+            const std::string message = prefix.empty() ? text : prefix + " " + text;
+            SetConsoleTextAttribute(m_handle, static_cast<WORD>(effectiveColor));
+            // 控制台使用 UTF-8 代码页；重定向时同样原样写入 UTF-8 字节。
+            // 仅真实控制台启用橙色转义序列，避免污染重定向文件。
+            const std::string output = effectiveColor == Color::Orange && m_virtualTerminal
+                ? "\x1b[38;2;255;165;0m" + message + "\x1b[0m" : message;
+            DWORD written = 0; // 本次写入的字节数。
+            WriteFile(m_handle, output.data(), static_cast<DWORD>(output.size()), &written, nullptr);
             SetConsoleTextAttribute(m_handle, m_defaultColor);
         }
 
-        void Line(const std::string& text, Color color = Color::White) const { Write(text + "\n", color); }
+        // 换行的打印函数
+        void Line(const std::string& text, Level level = Level::Info, Color color = Color::None) const {
+            Write(text + "\n", level, color);
+        }
 
+        // 读取按键
         int ReadKey() const {
             const int key = _getch();
             return key == 0 || key == 224 ? 256 + _getch() : key;
@@ -92,9 +147,9 @@ namespace {
         std::string hash; // 检查时计算的 SHA-256。
         bool validPe = false; // DOS 与 PE 头结构是否有效。
         bool checksumError = false; // 可选 PE 校验和是否不匹配。
-        bool authFeature = false; // 是否命中本工具当前的鉴权特征集合。
     };
 
+    // 哈希工具
     class HashService {
     public:
         static std::string Sha256(const Fs::path& path) {
@@ -131,11 +186,6 @@ namespace {
     };
 
     class PeScanner {
-    private:
-        static bool Contains(const std::vector<char>& bytes, const std::string& text) {
-            return std::search(bytes.begin(), bytes.end(), text.begin(), text.end()) != bytes.end();
-        }
-
     public:
         static FileInfo Scan(const Fs::path& path) {
             std::ifstream input(path, std::ios::binary);
@@ -164,7 +214,6 @@ namespace {
             DWORD storedChecksum = 0;
             std::memcpy(&storedChecksum, bytes.data() + optionalOffset + checksumOffsetInOptionalHeader, sizeof(storedChecksum));
             info.validPe = true;
-            info.authFeature = Contains(bytes, "RestrictMcDownload") && Contains(bytes, "SecretCdnSign");
             if (storedChecksum != 0) {
                 std::uint64_t sum = 0;
                 const size_t checksumFileOffset = optionalOffset + checksumOffsetInOptionalHeader;
@@ -185,53 +234,92 @@ namespace {
     };
 
     class PatchEngine {
+    private:
+
+        // 每类功能均需从待修补转为可验证的正常结构，不能用“没有字节补丁”代替功能完成。
+        static bool Verified(const PclFix::PatchAnalysis& before, const PclFix::PatchAnalysis& after) {
+            return before.version && before.version == after.version && PclFix::PatchRuleCatalog::BuiltIn().Select(*before.version).features.Verify(before, after);
+        }
+
     public:
+
+        // 是否支持修补
         static bool CanPatch(const FileInfo& info, const Console& console) {
-            const auto analysis = PclFix::ManagedPatch::Analyze(info.path);
-            if (!analysis.error.empty()) { console.Line("[-] " + analysis.error, Color::Red); return false; }
-            if (analysis.ranges.empty()) {
-                if (analysis.unavailableModpack) console.Line("[-] 整合包安装逻辑已被编译器删除，无法仅凭当前文件恢复。", Color::Red);
-                else console.Line("[+] 下载页面正常，无需重复修补。", Color::Green);
+
+            // 合并同类别下连续注册的具体特征进度。
+            std::optional<PclFix::PatchPointKind> scanning; 
+            const auto analysis = PclFix::ManagedPatch::Analyze(info.path, [&console, &scanning](PclFix::PatchPointKind kind) {
+                if (scanning != kind) console.Line("扫描 " + std::string(PclFix::PatchPointName(kind)) + "...", Console::Level::Info);
+                scanning = kind;
+            });
+            if (analysis.version) console.Line("PCL 程序集版本：" + analysis.version->ToString() + "，检查规则：" + analysis.ruleName, Console::Level::Info);
+            if (!analysis.warning.empty()) console.Line(analysis.warning, Console::Level::Warn);
+            console.Line("", Console::Level::None); // 扫描进度与分类结果之间留一行。
+            size_t recognized = 0; // 识别到结构或明确的不兼容点时，不能声称完全未发现。
+            for (const auto category : analysis.Categories()) {
+                console.Line(std::string(PclFix::PatchPointName(category)) + "：", Console::Level::Info, Console::Color::Orange);
+                for (const auto& feature : analysis.features) {
+                    if (feature.info.category != category) continue;
+                    const char* state = "已跳过（未识别）";  // 未匹配。
+                    Console::Level level = Console::Level::Warn; // 跳过属于警告，不阻止其他功能修补。
+                    Console::Color stateColor = Console::Color::Yellow; // 状态文字独立着色，功能名称保持等级默认颜色。
+                    if (feature.state != PclFix::FeatureState::NotFound) ++recognized;
+                    if (feature.state == PclFix::FeatureState::Restricted) {
+                        state = "需要修补"; level = Console::Level::Info; stateColor = Console::Color::Yellow;
+                    } else if (feature.state == PclFix::FeatureState::Restored) {
+                        state = "无需修补"; level = Console::Level::Info; stateColor = Console::Color::Green;
+                    } else if (feature.state == PclFix::FeatureState::Unsupported) state = "已跳过（结构不支持）";
+                    console.Write("    ", Console::Level::None); // 缩进只用于区分类别和具体功能。
+                    console.Write(feature.info.name + "：", level);
+                    console.Line(state, Console::Level::None, stateColor);
+                    if (!feature.reason.empty()) {
+                        console.Write("        ", Console::Level::None);
+                        console.Line(feature.reason, Console::Level::Warn);
+                    }
+                }
+            }
+            console.Line("", Console::Level::None); // 分类结果与扫描总结或报错之间留一行。
+            if (!recognized) {
+                console.Line("未识别到受支持的特征，可能目标是已修补版本、社区版或其他改版，也可能是尚未支持的版本。", Console::Level::Error);
+                if (!analysis.error.empty() && analysis.error != "未识别到受支持的特征。") console.Line(analysis.error, Console::Level::Error);
                 return false;
             }
-            console.Line("[=] 扫描完毕。总共有 " + std::to_string(analysis.TotalPoints()) + " 个注入点需要修补：", Color::White);
-            for (const auto kind : {PclFix::PatchPointKind::DownloadPage, PclFix::PatchPointKind::ModpackDownload,
-                PclFix::PatchPointKind::ModifyPage, PclFix::PatchPointKind::ResourceInstall}) {
-                const size_t count = analysis.Count(kind) + (kind == PclFix::PatchPointKind::ModpackDownload ? analysis.unavailableModpack : 0);
-                if (count) console.Line("[=] " + std::string(PclFix::PatchPointName(kind)) + "：" + std::to_string(count) + " 个", Color::White);
+            if (!analysis.error.empty()) { console.Line(analysis.error, Console::Level::Error); return false; }
+            if (!analysis.TotalPoints()) {
+                if (analysis.SkippedFeatures()) {
+                    console.Line("没有可确定需要修补的功能；未识别或不支持的功能已跳过。", Console::Level::Info);
+                    return false;
+                }
+                console.Line("目标下载功能全部正常，无需重复修补。", Console::Level::Success);
+                return false;
             }
-            if (analysis.restoredPages) console.Line("[=] 已存在正常下载页面：" + std::to_string(analysis.restoredPages) + " 个", Color::White);
-            if (!analysis.warning.empty()) console.Line("[-] " + analysis.warning, Color::Red);
+            console.Line("扫描完毕。总共有 " + std::to_string(analysis.TotalPoints()) + " 处需要修补：", Console::Level::Info);
+            for (const auto kind : analysis.Categories()) {
+                const size_t count = analysis.Count(kind);
+                if (count) console.Line(std::string(PclFix::PatchPointName(kind)) + "：" + std::to_string(count) + " 个", Console::Level::Info);
+            }
+
             return true;
         }
 
-        // 在内存快照中等长修改，临时文件通过结构复检后才替换目标。
+        // 分类报告已生成的计划，本次实际修改的功能验证成功后才替换目标。
         static bool Apply(const FileInfo& info, const Console& console) {
             const auto analysis = PclFix::ManagedPatch::Analyze(info.path);
-            if (!analysis.error.empty() || analysis.ranges.empty()) {
-                console.Line(analysis.error.empty() ? "[=] 无需重复修补。" : "[-] " + analysis.error, analysis.error.empty() ? Color::White : Color::Red);
+            if (!analysis.error.empty() || !analysis.TotalPoints()) {
+                console.Line(!analysis.error.empty() ? analysis.error : (analysis.SkippedFeatures() ? "没有可确定修补的功能，未修改文件。" : "无需重复修补。"), analysis.error.empty() ? Console::Level::Info : Console::Level::Error);
                 return false;
             }
-            std::ifstream input(info.path, std::ios::binary);
-            std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)), {});
-            input.close();
-            const auto categories = {PclFix::PatchPointKind::DownloadPage, PclFix::PatchPointKind::ModpackDownload,
-                PclFix::PatchPointKind::ModifyPage, PclFix::PatchPointKind::ResourceInstall};
+            const auto& bytes = analysis.image; // 分析器同时生成等长修改和完整方法恢复的候选镜像。
+            const auto categories = analysis.Categories(); // 类别来自实际注册特征。
             for (const auto kind : categories) {
                 if (!analysis.Count(kind)) continue;
-                console.Line("[=] 正在修补 " + std::string(PclFix::PatchPointName(kind)), Color::White);
-                for (const auto& range : analysis.ranges) {
-                    if (range.kind != kind) continue;
-                    if (range.offset > bytes.size() || range.before.size() > bytes.size() - range.offset ||
-                        !std::equal(range.before.begin(), range.before.end(), bytes.begin() + range.offset)) return false;
-                    std::copy(range.after.begin(), range.after.end(), bytes.begin() + range.offset);
-                }
+                console.Line("正在修补 " + std::string(PclFix::PatchPointName(kind)), Console::Level::Info);
+                console.Line("已生成 " + std::to_string(analysis.Count(kind)) + " 处修改，等待应用修改与校验。", Console::Level::Info);
             }
-            // PE 校验和为零表示未提供；CLR 程序允许此值。
-            IMAGE_DOS_HEADER dos{}; std::memcpy(&dos, bytes.data(), sizeof(dos));
-            const size_t checksum = dos.e_lfanew + 4 + sizeof(IMAGE_FILE_HEADER) + offsetof(IMAGE_OPTIONAL_HEADER32, CheckSum);
-            if (checksum + 4 > bytes.size()) return false;
-            std::fill_n(bytes.begin() + checksum, 4, 0);
+            if (bytes.empty() || HashService::Sha256(info.path) != info.hash) { 
+                console.Line("发现源文件发生变化，停止修补。", Console::Level::Error); return false; 
+            }
+
             const Fs::path temporary = info.path.wstring() + L".pclfix.tmp";
             // CREATE_NEW 防止覆盖已有临时文件。
             const HANDLE output = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -240,22 +328,23 @@ namespace {
             const bool saved = WriteFile(output, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) && written == bytes.size() && FlushFileBuffers(output);
             CloseHandle(output);
             const auto verified = PclFix::ManagedPatch::Analyze(temporary);
-            const size_t downloadPagePatchCount = analysis.Count(PclFix::PatchPointKind::DownloadPage);
-            bool success = saved && verified.error.empty() && verified.ranges.empty() && verified.restoredPages >= analysis.restoredPages + downloadPagePatchCount &&
+            bool success = saved && Verified(analysis, verified) &&
                 PeScanner::Scan(temporary).validPe && HashService::Sha256(info.path) == info.hash;
             if (success) success = ReplaceFileW(info.path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr) != FALSE;
-            if (!success) { std::error_code error; Fs::remove(temporary, error); console.Line("[-] 修补或临时文件复检失败，目标未替换。", Color::Red); return false; }
+            if (!success) { std::error_code error; Fs::remove(temporary, error); console.Line("修补或临时文件验证失败，目标未替换。", Console::Level::Error); if (!verified.error.empty()) console.Line(verified.error, Console::Level::Error); return false; }
             const auto finalCheck = PclFix::ManagedPatch::Analyze(info.path);
-            // ranges 为空表示本次识别到的页面、修改页和资源入口都已消失；下载页面额外检查正常加载器计数。
-            success = finalCheck.error.empty() && finalCheck.ranges.empty() && finalCheck.restoredPages >= verified.restoredPages;
+            success = Verified(analysis, finalCheck);
             if (success) {
-                console.Line("[+] 修补与复检完成。", Color::Green);
-                if (!finalCheck.warning.empty()) console.Line("[-] " + finalCheck.warning, Color::Red);
-            } else console.Line("[-] 替换后复检失败，请使用备份还原。", Color::Red);
+                for (const auto kind : categories) if (analysis.Count(kind)) console.Line(std::string(PclFix::PatchPointName(kind)) + "：本次修补完成，验证通过。", Console::Level::Success);
+                if (analysis.SkippedFeatures()) console.Line("本次可修补的功能已完成，另有 " + std::to_string(analysis.SkippedFeatures()) + " 项功能跳过，无法确认全部下载功能均已恢复。", Console::Level::Warn);
+                else console.Line("修补完成。", Console::Level::Success);
+                if (!finalCheck.warning.empty()) console.Line(finalCheck.warning, Console::Level::Warn);
+            } else console.Line("替换后验证失败，请使用备份还原。", Console::Level::Error);
             return success;
         }
     };
 
+    // 备份
     class BackupManager {
     public:
         static bool Create(const Fs::path& target, const Console& console) {
@@ -265,23 +354,29 @@ namespace {
             if (Fs::exists(backup, error)) {
                 const auto existingHash = HashService::Sha256(backup);
                 if (existingHash.size() == 64 && existingHash == HashService::Sha256(target)) {
-                    console.Line("[+] 已有备份与当前文件一致，复用该备份。", Color::Green);
+                    console.Line("已有相同文件哈希的备份，无需重复创建。", Console::Level::Success);
                     return true;
                 }
-                console.Line("[-] 备份文件已存在，为避免覆盖拒绝继续：" + PathToUtf8(backup.filename()), Color::Red);
-                return false;
+                const auto currentHash = HashService::Sha256(target); // 升级旧补丁时保留最初备份，并另存本次修改前的状态。
+                if (currentHash.size() != 64) { console.Line("无法校验当前文件，停止备份。", Console::Level::Error); return false; }
+                backup = target.wstring() + L".pclfix." + std::wstring(currentHash.begin(), currentHash.begin() + 16) + L".bak";
+                if (Fs::exists(backup, error)) {
+                    if (HashService::Sha256(backup) == currentHash) { console.Line("已保留最初备份，也已有当前文件的备份，无需重复创建。", Console::Level::Success); return true; }
+                    console.Line("同名备份已存在，但内容不同，已停止以免覆盖。", Console::Level::Error); return false;
+                }
+                console.Line("保留最初的 .pclfix.bak，另存当前状态备份。", Console::Level::Info);
             }
             Fs::copy_file(target, backup, Fs::copy_options::none, error);
             if (error) {
-                console.Line("[-] 创建备份失败：" + error.message(), Color::Red);
+                console.Line("创建备份失败：" + error.message(), Console::Level::Error);
                 return false;
             }
             const auto backupHash = HashService::Sha256(backup);
             if (backupHash.size() != 64 || backupHash != HashService::Sha256(target)) {
-                console.Line("[-] 备份内容校验失败，已停止修补。", Color::Red);
+                console.Line("备份内容校验失败，已停止修补。", Console::Level::Error);
                 return false;
             }
-            console.Line("[+] 已创建备份：" + PathToUtf8(backup.filename()), Color::Green);
+            console.Line("已创建备份：" + PathToUtf8(backup.filename()), Console::Level::Success);
             return true;
         }
 
@@ -289,32 +384,32 @@ namespace {
             Fs::path backup = target;
             backup += ".pclfix.bak";
             if (!Fs::exists(backup)) {
-                console.Line("[-] 未找到对应的 .pclfix.bak 备份。", Color::Red);
+                console.Line("未找到对应的 .pclfix.bak 备份。", Console::Level::Error);
                 return false;
             }
             const FileInfo backupInfo = PeScanner::Scan(backup);
             if (!backupInfo.validPe || backupInfo.checksumError) {
-                console.Line("[-] 备份文件的 PE 头或校验码无效，拒绝还原。", Color::Red);
+                console.Line("备份文件的 PE 头或校验码无效，无法还原。", Console::Level::Error);
                 return false;
             }
             const Fs::path temporary = target.wstring() + L".pclfix.restore.tmp";
             std::error_code error;
             Fs::copy_file(backup, temporary, Fs::copy_options::none, error);
             if (error) {
-                console.Line("[-] 无法创建还原临时文件：" + error.message(), Color::Red);
+                console.Line("无法创建还原临时文件：" + error.message(), Console::Level::Error);
                 return false;
             }
             if (!PeScanner::Scan(temporary).validPe || HashService::Sha256(temporary) != backupInfo.hash ||
                 !MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
                 Fs::remove(temporary, error);
-                console.Line("[-] 还原失败，原文件未替换。", Color::Red);
+                console.Line("还原失败，原文件未替换。", Console::Level::Error);
                 return false;
             }
             if (HashService::Sha256(target) != backupInfo.hash) {
-                console.Line("[-] 还原后的内容校验失败，请保留备份文件。", Color::Red);
+                console.Line("还原后的内容校验失败，请保留备份文件。", Console::Level::Error);
                 return false;
             }
-            console.Line("[+] 已从备份还原 PCL。", Color::Green);
+            console.Line("已从备份还原 PCL。", Console::Level::Success);
             return true;
         }
     };
@@ -352,30 +447,34 @@ namespace {
         Console m_console; // 负责控制台颜色、UTF-8 输出和无回显按键读取。
 
         void Pause() const {
-            m_console.Line("[=] 按任意键返回。", Color::Orange);
+            m_console.Line("按任意键返回。", Console::Level::Info, Console::Color::Orange);
             m_console.ReadKey();
         }
 
         void Header() const {
-            m_console.Line("==========================="); 
-            m_console.Line("");
-            m_console.Line("PCL Download Patcher v1.0"); 
-            m_console.Line("Author: Txt_Text");
-            m_console.Line("");
-            m_console.Line("本工具完全免费开源！项目 GitHub 链接：https://github.com/Txt-Text/PCL-Download-Patcher"); 
-            m_console.Line("");
-            m_console.Line("===========================");
+            m_console.Line("======================================================", Console::Level::None, Console::Color::Orange); 
+            m_console.Line("", Console::Level::None);
+            m_console.Line("PCL Download Patcher", Console::Level::None, Console::Color::Orange); 
+            m_console.Line("Version: " PCL_DOWNLOAD_PATCHER_VERSION, Console::Level::None, Console::Color::Orange); 
+            m_console.Line("Author: " PCL_DOWNLOAD_PATCHER_AUTHOR, Console::Level::None, Console::Color::Orange);
+            m_console.Line("GitHub 链接：https://github.com/Txt-Text/PCL-Download-Patcher", Console::Level::None, Console::Color::Orange); 
+            m_console.Line("", Console::Level::None);
+            m_console.Line("若修补失败请尝试最新版，依旧失败就在 Github 发 Issue 告诉一下 Ta 啦。", Console::Level::None, Console::Color::Orange); 
+            m_console.Line("本工具完全免费开源，有帮到就求个 Star 喵。", Console::Level::None, Console::Color::Orange); 
+            m_console.Line("", Console::Level::None);
+            m_console.Line("======================================================", Console::Level::None, Console::Color::Orange); 
+            m_console.Line("当前版本暂不支持 CE 版，但很快会的。\n", Console::Level::Info, Console::Color::Gray);
         }
 
         int Menu(const std::vector<std::string>& items) const {
             size_t selected = 0;
             while (true) {
-                system("cls"); Header(); m_console.Line("请选择需要进行的操作：");
+                system("cls"); Header(); m_console.Line("请选择需要进行的操作：", Console::Level::None);
                 for (size_t index = 0; index < items.size(); ++index) {
-                    m_console.Write(index == selected ? "> " : "  ", index == selected ? Color::Yellow : Color::White);
-                    m_console.Line(std::to_string(index + 1) + "." + items[index], index == selected ? Color::Yellow : Color::White);
+                    m_console.Write(index == selected ? "> " : "  ", Console::Level::None, index == selected ? Console::Color::Yellow : Console::Color::White);
+                    m_console.Line(std::to_string(index + 1) + "." + items[index], Console::Level::None, index == selected ? Console::Color::Yellow : Console::Color::White);
                 }
-                m_console.Line(""); m_console.Line("[↑] 上一个选项 | [↓] 下一个选项 | [Enter] 确认 | [ESC] 退出", Color::Orange);
+                m_console.Line("", Console::Level::None); m_console.Line("[↑] 上一个选项 | [↓] 下一个选项 | [Enter] 确认 | [ESC] 退出", Console::Level::None, Console::Color::Orange);
                 const int key = m_console.ReadKey();
                 if (key == 256 + 72 || key == 256 + 75) selected = selected == 0 ? items.size() - 1 : selected - 1;
                 else if (key == 256 + 80 || key == 256 + 77) selected = (selected + 1) % items.size();
@@ -391,7 +490,7 @@ namespace {
             dialog.lStructSize = sizeof(dialog);
             dialog.lpstrFilter = L"可执行文件 (*.exe)\0*.exe\0所有文件 (*.*)\0*.*\0"; dialog.lpstrFile = filename; dialog.nMaxFile = static_cast<DWORD>(std::size(filename));
             dialog.hwndOwner = GetConsoleWindow(); // 文件选择窗口归属于当前控制台。
-            dialog.lpstrTitle = L"请选择 PCL 可执行文件";
+            dialog.lpstrTitle = L"请选择 PCL 可执行文件（.exe）";
             dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
             return GetOpenFileNameW(&dialog) ? std::optional<Fs::path>(filename) : std::nullopt;
         }
@@ -401,27 +500,30 @@ namespace {
             const auto selected = PickFile(); // 直接由用户选择目标，不枚举程序目录。
             if (!selected) return;
             const auto info = PeScanner::Scan(*selected);
-            if (!info.validPe) { m_console.Line("[-] PE头校验错误，这不是一个有效的EXE文件。", Color::Red); Pause(); return; }
-            if (info.checksumError) { m_console.Line("[-] 校验码校验错误，文件可能已损坏或被修改。", Color::Red); Pause(); return; }
-            m_console.Line(info.authFeature ? "[+] 识别到新版鉴权特征。" : "[-] 未识别到新版鉴权特征，可能是旧版、社区版和其他改版。", info.authFeature ? Color::Green : Color::Red);
-            m_console.Line("[=] SHA-256: " + info.hash);
-            // 字符串特征仅供提示；最终兼容性以元数据和 IL 结构校验为准。
-            if (!PatchEngine::CanPatch(info, m_console)) { Pause(); return; }
-            m_console.Line("[=] 按 Enter 创建备份并开始修补，按 ESC 取消。", Color::Orange);
+            if (!info.validPe) { m_console.Line("PE 头校验失败，这不是一个有效的EXE文件。", Console::Level::Error); Pause(); return; }
+            if (info.checksumError) { m_console.Line("校验码校验失败，可能是文件已损坏或被修改。", Console::Level::Error); Pause(); return; }
+            m_console.Line("SHA-256: " + info.hash, Console::Level::Info);
+
+            // 具体鉴权特征由注册的修补点扫描，不依赖程序集字符串标记。
+            if (!PatchEngine::CanPatch(info, m_console)) { 
+                Pause(); return; 
+            }
+
+            m_console.Line("按 [Enter] 创建备份并开始修补，按 [ESC] 取消。", Console::Level::Info, Console::Color::Orange);
             const int confirm = m_console.ReadKey();
-            if (confirm != 13) { m_console.Line("[=] 已取消。", Color::White); Pause(); return; }
+            if (confirm != 13) { m_console.Line("已取消。", Console::Level::Info); Pause(); return; }
             const auto processRunning = ProcessGuard::IsRunning(info.path);
             if (!processRunning) {
-                m_console.Line("[-] 无法检查 PCL 进程状态，已停止修补。", Color::Red);
+                m_console.Line("无法检查 PCL 进程状态，停止修补。", Console::Level::Error);
                 Pause(); return;
             }
             if (*processRunning) {
-                m_console.Line("[-] 检测到 PCL 正在运行，请先完全退出 PCL 后重试。", Color::Red);
+                m_console.Line("检测到 PCL 正在运行，请退出 PCL 后重试。", Console::Level::Error);
                 Pause(); return;
             }
             const auto beforeWrite = PeScanner::Scan(info.path);
             if (!beforeWrite.validPe || beforeWrite.checksumError || beforeWrite.hash != info.hash) {
-                m_console.Line("[-] 文件在确认后发生变化，已取消修补。", Color::Red);
+                m_console.Line("文件在确认后发生变化，取消修补。", Console::Level::Error);
                 Pause(); return;
             }
             if (!BackupManager::Create(info.path, m_console)) { Pause(); return; }
@@ -429,29 +531,43 @@ namespace {
             Pause();
         }
 
-        void BackupRestore() {
-            const int operation = Menu({"备份PCL", "还原PCL", "返回"});
-            if (operation < 0 || operation == 2) return;
-            const auto selected = PickFile(); // 备份与还原同样只使用文件选择窗口。
+        // 从主菜单直接选择文件并创建备份。
+        void BackupPcl() {
+            const auto selected = PickFile(); // 备份目标由用户选择。
             if (!selected) return;
-            const auto info = PeScanner::Scan(*selected);
-            // 还原时允许当前 EXE 损坏；需要校验的是待恢复的备份。
-            if (operation == 0 && (!info.validPe || info.checksumError)) { m_console.Line("[-] PE头或校验码校验错误。", Color::Red); Pause(); return; }
-            const auto running = ProcessGuard::IsRunning(info.path);
-            if (!running || *running) { m_console.Line("[-] PCL 正在运行或进程状态不可确认，已停止操作。", Color::Red); Pause(); return; }
-            if (operation == 0) BackupManager::Create(info.path, m_console);
-            else {
-                m_console.Line("[=] 按 Enter 确认覆盖当前文件，按 ESC 取消。", Color::Orange);
-                if (m_console.ReadKey() == 13) BackupManager::Restore(info.path, m_console);
-                else m_console.Line("[=] 已取消还原。", Color::White);
-            }
+            const auto info = PeScanner::Scan(*selected); // 备份前检查当前 EXE 是否有效。
+            if (!info.validPe || info.checksumError) { m_console.Line("PE 头或校验码校验失败。", Console::Level::Error); Pause(); return; }
+            const auto running = ProcessGuard::IsRunning(info.path); // 运行中的文件不进行备份。
+            if (!running || *running) { m_console.Line("PCL 正在运行或进程状态不可确认，已停止操作。", Console::Level::Error); Pause(); return; }
+            BackupManager::Create(info.path, m_console);
+            Pause();
+        }
+
+        // 从主菜单直接选择待还原文件，覆盖前仍需要确认。
+        void RestorePcl() {
+            const auto selected = PickFile(); // 还原时允许当前 EXE 损坏；由还原流程校验备份。
+            if (!selected) return;
+            const auto running = ProcessGuard::IsRunning(*selected); // 避免覆盖正在运行的 PCL。
+            if (!running || *running) { m_console.Line("PCL 正在运行或进程状态不可确认，已停止操作。", Console::Level::Error); Pause(); return; }
+            m_console.Line("按 [Enter] 确认覆盖当前文件，按 [ESC] 取消。", Console::Level::Info, Console::Color::Orange);
+            if (m_console.ReadKey() == 13) BackupManager::Restore(*selected, m_console);
+            else m_console.Line("已取消还原。", Console::Level::Info);
             Pause();
         }
 
     public:
         int Run() {
+            (void)PclFix::PatchRuleCatalog::BuiltIn(); // 启动时注册版本规则及各自的修补功能。
             SetConsoleOutputCP(CP_UTF8);
-            while (true) { const int choice = Menu({"修补PCL", "备份与还原PCL"}); if (choice < 0) return 0; if (choice == 0) PatchPcl(); else BackupRestore(); }
+            while (true) {
+                const int choice = Menu({"修补PCL", "还原PCL", "备份PCL"}); // 主菜单直接进入对应操作。
+                if (choice < 0) return 0;
+                switch (choice) {
+                case 0: PatchPcl(); break;
+                case 1: RestorePcl(); break;
+                case 2: BackupPcl(); break;
+                }
+            }
         }
     };
 }

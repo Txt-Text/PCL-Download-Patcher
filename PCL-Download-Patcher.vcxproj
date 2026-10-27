@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -71,7 +71,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <IntDir>$(ProjectDir)build\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(ProjectDir)build\bin\$(Platform)\$(Configuration)\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -150,6 +151,28 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ManagedPatch.h" />
+    <ClInclude Include="TargetVersion.hpp" />
+    <ClInclude Include="PatchRuleCatalog.hpp" />
+    <ClInclude Include="Features\DisabledModDownloadFeature.hpp" />
+    <ClInclude Include="Features\DownloadNavigationFeature.hpp" />
+    <ClInclude Include="Features\DownloadVisibilityCode.hpp" />
+    <ClInclude Include="Features\EmptyListDownloadFeature.hpp" />
+    <ClInclude Include="Features\LaunchDownloadFeature.hpp" />
+    <ClInclude Include="Features\MethodPatchFeature.hpp" />
+    <ClInclude Include="Features\ModpackImportFeature.hpp" />
+    <ClInclude Include="Features\ModpackSearchFeature.hpp" />
+    <ClInclude Include="Features\UpdateDownloadFeature.hpp" />
+    <ClInclude Include="ManagedPatchContext.hpp" />
+    <ClInclude Include="PatchTypes.hpp" />
+    <ClInclude Include="ManagedRewrite.h" />
+    <ClInclude Include="ManagedResources.h" />
+    <ClInclude Include="Features\IPatchFeature.hpp" />
+    <ClInclude Include="Features\PatchFeatureRegistry.hpp" />
+    <ClInclude Include="Features\DownloadPageLoaderFeature.hpp" />
+    <ClInclude Include="Features\ModpackPickerFeature.hpp" />
+    <ClInclude Include="Features\ModpackDispatcherFeature.hpp" />
+    <ClInclude Include="Features\ModifyMinecraftCardFeature.hpp" />
+    <ClInclude Include="Features\ResourceInstallFeature.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

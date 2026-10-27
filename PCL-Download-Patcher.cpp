@@ -189,8 +189,19 @@ namespace {
         static bool CanPatch(const FileInfo& info, const Console& console) {
             const auto analysis = PclFix::ManagedPatch::Analyze(info.path);
             if (!analysis.error.empty()) { console.Line("[-] " + analysis.error, Color::Red); return false; }
-            if (analysis.ranges.empty()) { console.Line("[+] 下载页面正常，无需重复修补。", Color::Green); return false; }
-            console.Line("[+] 已定位可恢复的下载页面：" + std::to_string(analysis.ranges.size()), Color::Green);
+            if (analysis.ranges.empty()) {
+                if (analysis.unavailableModpack) console.Line("[-] 整合包安装逻辑已被编译器删除，无法仅凭当前文件恢复。", Color::Red);
+                else console.Line("[+] 下载页面正常，无需重复修补。", Color::Green);
+                return false;
+            }
+            console.Line("[=] 扫描完毕。总共有 " + std::to_string(analysis.TotalPoints()) + " 个注入点需要修补：", Color::White);
+            for (const auto kind : {PclFix::PatchPointKind::DownloadPage, PclFix::PatchPointKind::ModpackDownload,
+                PclFix::PatchPointKind::ModifyPage, PclFix::PatchPointKind::ResourceInstall}) {
+                const size_t count = analysis.Count(kind) + (kind == PclFix::PatchPointKind::ModpackDownload ? analysis.unavailableModpack : 0);
+                if (count) console.Line("[=] " + std::string(PclFix::PatchPointName(kind)) + "：" + std::to_string(count) + " 个", Color::White);
+            }
+            if (analysis.restoredPages) console.Line("[=] 已存在正常下载页面：" + std::to_string(analysis.restoredPages) + " 个", Color::White);
+            if (!analysis.warning.empty()) console.Line("[-] " + analysis.warning, Color::Red);
             return true;
         }
 
@@ -204,10 +215,17 @@ namespace {
             std::ifstream input(info.path, std::ios::binary);
             std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)), {});
             input.close();
-            for (const auto& range : analysis.ranges) {
-                if (range.offset > bytes.size() || range.before.size() > bytes.size() - range.offset ||
-                    !std::equal(range.before.begin(), range.before.end(), bytes.begin() + range.offset)) return false;
-                std::copy(range.after.begin(), range.after.end(), bytes.begin() + range.offset);
+            const auto categories = {PclFix::PatchPointKind::DownloadPage, PclFix::PatchPointKind::ModpackDownload,
+                PclFix::PatchPointKind::ModifyPage, PclFix::PatchPointKind::ResourceInstall};
+            for (const auto kind : categories) {
+                if (!analysis.Count(kind)) continue;
+                console.Line("[=] 正在修补 " + std::string(PclFix::PatchPointName(kind)), Color::White);
+                for (const auto& range : analysis.ranges) {
+                    if (range.kind != kind) continue;
+                    if (range.offset > bytes.size() || range.before.size() > bytes.size() - range.offset ||
+                        !std::equal(range.before.begin(), range.before.end(), bytes.begin() + range.offset)) return false;
+                    std::copy(range.after.begin(), range.after.end(), bytes.begin() + range.offset);
+                }
             }
             // PE 校验和为零表示未提供；CLR 程序允许此值。
             IMAGE_DOS_HEADER dos{}; std::memcpy(&dos, bytes.data(), sizeof(dos));
@@ -222,12 +240,18 @@ namespace {
             const bool saved = WriteFile(output, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) && written == bytes.size() && FlushFileBuffers(output);
             CloseHandle(output);
             const auto verified = PclFix::ManagedPatch::Analyze(temporary);
-            bool success = saved && verified.error.empty() && verified.ranges.empty() && verified.restoredPages >= analysis.restoredPages + analysis.ranges.size() && PeScanner::Scan(temporary).validPe && HashService::Sha256(info.path) == info.hash;
+            const size_t downloadPagePatchCount = analysis.Count(PclFix::PatchPointKind::DownloadPage);
+            bool success = saved && verified.error.empty() && verified.ranges.empty() && verified.restoredPages >= analysis.restoredPages + downloadPagePatchCount &&
+                PeScanner::Scan(temporary).validPe && HashService::Sha256(info.path) == info.hash;
             if (success) success = ReplaceFileW(info.path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr) != FALSE;
             if (!success) { std::error_code error; Fs::remove(temporary, error); console.Line("[-] 修补或临时文件复检失败，目标未替换。", Color::Red); return false; }
             const auto finalCheck = PclFix::ManagedPatch::Analyze(info.path);
-            success = finalCheck.error.empty() && finalCheck.ranges.empty() && finalCheck.restoredPages == verified.restoredPages;
-            console.Line(success ? "[+] 修补与复检完成。" : "[-] 替换后复检失败，请使用备份还原。", success ? Color::Green : Color::Red);
+            // ranges 为空表示本次识别到的页面、修改页和资源入口都已消失；下载页面额外检查正常加载器计数。
+            success = finalCheck.error.empty() && finalCheck.ranges.empty() && finalCheck.restoredPages >= verified.restoredPages;
+            if (success) {
+                console.Line("[+] 修补与复检完成。", Color::Green);
+                if (!finalCheck.warning.empty()) console.Line("[-] " + finalCheck.warning, Color::Red);
+            } else console.Line("[-] 替换后复检失败，请使用备份还原。", Color::Red);
             return success;
         }
     };

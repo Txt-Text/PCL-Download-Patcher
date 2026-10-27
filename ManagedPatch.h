@@ -16,18 +16,51 @@
 #pragma comment(lib, "mscoree.lib")
 
 namespace PclFix {
+
+    // 可独立扫描、写入和回显的功能类别；新增限制点时只需增加类别和对应分析规则。
+    enum class PatchPointKind {
+        DownloadPage, // Minecraft 下载页面的正常加载器绑定。
+        ModpackDownload, // 整合包安装入口。
+        ModifyPage, // 修改已有实例页面的 Minecraft 卡片。
+        ResourceInstall // 资源详情列表的安装入口。
+    };
+
+    // 将类别转换为用户可读名称，统一用于扫描摘要和修补进度。
+    inline const char* PatchPointName(PatchPointKind kind) {
+        switch (kind) {
+        case PatchPointKind::DownloadPage: return "下载页面";
+        case PatchPointKind::ModpackDownload: return "整合包下载";
+        case PatchPointKind::ModifyPage: return "修改页 Minecraft 卡片";
+        case PatchPointKind::ResourceInstall: return "资源安装入口";
+        default: return "未知修补点";
+        }
+    }
+
     // 一段等长 IL 替换，保存原始字节以防分析后目标文件改变。
     struct PatchRange {
         size_t offset = 0; // 文件内的实际偏移，每次从 RVA 动态计算。
         std::vector<unsigned char> before; // 替换前字节。
         std::vector<unsigned char> after; // 替换后字节。
+        PatchPointKind kind = PatchPointKind::DownloadPage; // 该字节范围所属的功能类别。
     };
 
     // 解析结果同时用于界面显示、事务写入和修补后复检。
     struct PatchAnalysis {
         std::vector<PatchRange> ranges; // 所有确认匹配的下载页面。
         size_t restoredPages = 0; // 已直接绑定正常加载器的页面数。
+        size_t restoredVisibility = 0; // 已恢复的修改页原版卡片显示逻辑。
+        size_t restoredResourceItems = 0; // 已恢复的资源详情安装入口数量。
+        size_t unavailableModpack = 0; // 受限常量导致整合包逻辑被编译器删除的页面数。
         std::string error; // 结构不符时的具体原因。
+        std::string warning; // 可继续修补但存在未恢复功能时的提示。
+
+        // 统计一个类别中实际可以写入的范围数量。
+        size_t Count(PatchPointKind kind) const {
+            return static_cast<size_t>(std::count_if(ranges.begin(), ranges.end(), [kind](const auto& range) { return range.kind == kind; }));
+        }
+
+        // 扫描摘要中的总数包含无法从目标文件恢复的整合包入口。
+        size_t TotalPoints() const { return ranges.size() + unavailableModpack; }
     };
 
     // 只读解析 CLR 元数据与 CIL，不加载或执行目标程序集。
@@ -207,6 +240,139 @@ namespace PclFix {
             return size + 1 == m_loaderSignature.size() && std::equal(signature, signature + size, m_loaderSignature.begin() + 1);
         }
 
+        // 在一个类型中按名称查找方法定义，令后续规则与方法令牌无关。
+        mdMethodDef FindNamedMethod(mdTypeDef type, const wchar_t* name) const {
+            MetadataEnumeration enumeration{m_metadata.Get()};
+            mdMethodDef methods[128]{}; ULONG count = 0;
+            while (SUCCEEDED(m_metadata->EnumMethods(&enumeration.handle, type, methods, 128, &count)) && count) {
+                for (ULONG index = 0; index < count; ++index) {
+                    wchar_t methodName[512]{};
+                    if (SUCCEEDED(m_metadata->GetMethodProps(methods[index], nullptr, methodName, 512, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr)) &&
+                        std::wstring(methodName) == name) return methods[index];
+                }
+            }
+            return 0;
+        }
+
+        // 将一字节常量替换为另一个同长度常量，并保存前后字节用于事务校验。
+        void AddBytePatch(const MethodBody& body, const Instruction& instruction, unsigned char before, unsigned char after,
+            PatchPointKind kind, PatchAnalysis& analysis) const {
+            const size_t offset = body.offset + instruction.offset;
+            if (instruction.size != 1 || m_bytes[offset] != before) throw std::runtime_error("目标 IL 常量结构不匹配。");
+            PatchRange range;
+            range.offset = offset;
+            range.before = {before};
+            range.after = {after};
+            range.kind = kind;
+            analysis.ranges.push_back(std::move(range));
+        }
+
+        // 恢复 PageDownloadModify 中由 RestrictMcDownload 控制的 CardMinecraft 显示。
+        void AnalyzeModifyVisibility(mdTypeDef type, PatchAnalysis& analysis) const {
+            MetadataEnumeration enumeration{m_metadata.Get()};
+            mdMethodDef methods[128]{}; ULONG count = 0;
+            while (SUCCEEDED(m_metadata->EnumMethods(&enumeration.handle, type, methods, 128, &count)) && count) {
+                for (ULONG methodIndex = 0; methodIndex < count; ++methodIndex) {
+                    MethodBody body;
+                    try { body = Body(methods[methodIndex]); } catch (const std::exception&) { continue; }
+                    for (size_t index = 0; index + 2 < body.instructions.size(); ++index) {
+                        const auto& getter = body.instructions[index];
+                        const auto& value = body.instructions[index + 1];
+                        const auto& setter = body.instructions[index + 2];
+                        mdToken getterOwner = 0;
+                        mdToken setterOwner = 0;
+                        if ((getter.opcode != 0x28 && getter.opcode != 0x6f) ||
+                            MemberName(getter.token, getterOwner) != L"get_CardMinecraft" ||
+                            TypeName(getterOwner) != L"PCL.PageDownloadInstall" ||
+                            value.opcode != 0x18 ||
+                            (setter.opcode != 0x28 && setter.opcode != 0x6f) ||
+                            MemberName(setter.token, setterOwner) != L"set_Visibility") continue;
+                        AddBytePatch(body, value, 0x18, 0x16, PatchPointKind::ModifyPage, analysis);
+                        ++analysis.restoredVisibility;
+                    }
+                }
+            }
+        }
+
+        // 恢复资源详情列表的安装点击入口。受限版本通常仍保留 Install_Click 方法，只有 ldftn 目标被换成 Save_Click。
+        void AnalyzeResourceItems(mdTypeDef type, PatchAnalysis& analysis) const {
+            const mdMethodDef install = FindNamedMethod(type, L"Install_Click");
+            if (!install) return;
+            MetadataEnumeration enumeration{m_metadata.Get()};
+            mdMethodDef methods[128]{}; ULONG count = 0;
+            while (SUCCEEDED(m_metadata->EnumMethods(&enumeration.handle, type, methods, 128, &count)) && count) {
+                for (ULONG methodIndex = 0; methodIndex < count; ++methodIndex) {
+                    MethodBody body;
+                    try { body = Body(methods[methodIndex]); } catch (const std::exception&) { continue; }
+                    bool hasListItemCall = false; // 只处理构造资源列表项的那个方法。
+                    for (const auto& instruction : body.instructions) {
+                        mdToken callOwner = 0;
+                        if ((instruction.opcode == 0x28 || instruction.opcode == 0x6f) &&
+                            MemberName(instruction.token, callOwner) == L"ToListItem") hasListItemCall = true;
+                    }
+                    if (!hasListItemCall) continue;
+                    for (size_t instructionIndex = 0; instructionIndex < body.instructions.size(); ++instructionIndex) {
+                        const auto& instruction = body.instructions[instructionIndex];
+                        if (instruction.opcode != 0xfe06) continue; // ldftn
+                        mdToken owner = 0;
+                        if (MemberName(instruction.token, owner) != L"Save_Click" || TypeName(owner) != TypeName(type)) continue;
+                        PatchRange range;
+                        // ldftn 使用 FE 06 双字节操作码，四字节令牌从指令偏移加 2 开始。
+                        range.offset = body.offset + instruction.offset + 2;
+                        range.kind = PatchPointKind::ResourceInstall;
+                        range.before.resize(sizeof(mdToken));
+                        range.after.resize(sizeof(mdToken));
+                        std::memcpy(range.before.data(), &instruction.token, sizeof(mdToken));
+                        std::memcpy(range.after.data(), &install, sizeof(mdToken));
+                        analysis.ranges.push_back(std::move(range));
+                        ++analysis.restoredResourceItems;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 检测整合包入口是否只剩下“限制提示”。这种情况无法从目标文件自身恢复被编译器删除的正文。
+        void AnalyzeModpackAvailability(mdTypeDef type, PatchAnalysis& analysis) const {
+            MetadataEnumeration enumeration{m_metadata.Get()};
+            mdMethodDef methods[128]{}; ULONG count = 0;
+            while (SUCCEEDED(m_metadata->EnumMethods(&enumeration.handle, type, methods, 128, &count)) && count) {
+                for (ULONG methodIndex = 0; methodIndex < count; ++methodIndex) {
+                    wchar_t methodName[512]{};
+                    if (FAILED(m_metadata->GetMethodProps(methods[methodIndex], nullptr, methodName, 512, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr)) ||
+                        std::wstring(methodName) != L"ModpackInstall") continue;
+                    MethodBody body;
+                    try { body = Body(methods[methodIndex]); } catch (const std::exception&) { continue; }
+                    bool hasRestriction = false; // 是否仍包含相关法规提示字符串。
+                    bool hasInstallBody = false; // 是否保留了整合包选择、解析或线程安装正文。
+                    for (const auto& instruction : body.instructions) {
+                        if (instruction.opcode == 0x72) {
+                            wchar_t text[1024]{}; ULONG textLength = 0;
+                            if (SUCCEEDED(m_metadata->GetUserString(instruction.token, text, 1024, &textLength))) {
+                                const std::wstring value(text, textLength);
+                                if (value.find(L"相关法律法规") != std::wstring::npos || value.find(L"下载功能") != std::wstring::npos) hasRestriction = true;
+                            }
+                        }
+                        mdToken owner = 0;
+                        const std::wstring name = (instruction.opcode == 0x28 || instruction.opcode == 0x6f) ? MemberName(instruction.token, owner) : L"";
+                        if (name == L"RunInThread" || name == L"OpenZip" || name == L"SelectFile" || name == L"ModpackInstall") hasInstallBody = true;
+                    }
+                    bool patchedGuard = false; // 是否找到保留正文的可逆限制分支。
+                    if (hasRestriction && hasInstallBody) {
+                        for (size_t index = 1; index < body.instructions.size(); ++index) {
+                            const auto& value = body.instructions[index - 1];
+                            const auto& branch = body.instructions[index];
+                            if (value.opcode != 0x17 || branch.opcode != 0x2c || branch.targets.empty() || branch.targets.front() <= branch.offset) continue;
+                            AddBytePatch(body, value, 0x17, 0x16, PatchPointKind::ModpackDownload, analysis);
+                            patchedGuard = true;
+                            break;
+                        }
+                    }
+                    if (hasRestriction && !patchedGuard) ++analysis.unavailableModpack;
+                }
+            }
+        }
+
         // 检查被删除的表达式只构造一个任务，不读取表达式外的栈值。
         // 所有分支合流时栈深必须一致，防止仅凭字符串误改相似代码。
         void ValidateExpression(const MethodBody& body, size_t first_index, size_t end_offset) const {
@@ -293,6 +459,7 @@ namespace PclFix {
                 }
                 ValidateExpression(body, index, end);
                 PatchRange range; range.offset = body.offset + instruction.offset;
+                range.kind = PatchPointKind::DownloadPage;
                 range.before.assign(m_bytes.begin() + range.offset, m_bytes.begin() + body.offset + end);
                 range.after.assign(range.before.size(), 0); // 剩余字节使用 nop 保持原方法长度。
                 range.after[0] = 0x7e; // ldsfld：压入程序已有的正常加载器。
@@ -341,7 +508,20 @@ namespace PclFix {
                         if (name.starts_with(L"PCL.PageDownload")) parser.AnalyzePage(types[index], analysis);
                     }
                 }
-                if (analysis.ranges.empty() && !analysis.restoredPages) analysis.error = "没有匹配到支持的下载页面绑定结构。";
+                HCORENUM featureEnumeration = nullptr;
+                mdTypeDef featureTypes[128]{}; ULONG featureCount = 0;
+                while (SUCCEEDED(parser.m_metadata->EnumTypeDefs(&featureEnumeration, featureTypes, 128, &featureCount)) && featureCount) {
+                    for (ULONG index = 0; index < featureCount; ++index) {
+                        const mdTypeDef type = featureTypes[index];
+                        const std::wstring name = parser.TypeName(type);
+                        if (name == L"PCL.PageDownloadModify") parser.AnalyzeModifyVisibility(type, analysis);
+                        if (name == L"PCL.PageDownloadResourceDetail" || name == L"PCL.PageDownloadCompDetail") parser.AnalyzeResourceItems(type, analysis);
+                        if (name == L"PCL.ModModpack") parser.AnalyzeModpackAvailability(type, analysis);
+                    }
+                }
+                if (featureEnumeration) parser.m_metadata->CloseEnum(featureEnumeration);
+                if (analysis.unavailableModpack) analysis.warning = "整合包安装方法只剩限制提示，目标文件中没有可恢复的原始安装 IL。";
+                if (analysis.ranges.empty() && !analysis.restoredPages && !analysis.unavailableModpack) analysis.error = "没有匹配到支持的下载页面绑定结构。";
             } catch (const std::exception& error) { analysis.error = error.what(); analysis.ranges.clear(); }
             return analysis;
         }

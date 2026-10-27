@@ -29,7 +29,8 @@ namespace PclFix {
             Require(HashService::Sha256(target.wstring() + L".pclfix.bak") == originalHash, "backup differs");
             Require(PatchEngine::Apply(info, console), "patch failed");
             const auto after = ManagedPatch::Analyze(target);
-            Require(after.error.empty() && after.ranges.empty() && after.restoredPages >= before.restoredPages + before.ranges.size(), "patched structure invalid");
+            const size_t pagePatchCount = before.Count(PclFix::PatchPointKind::DownloadPage); // 混合规则中只有下载页面规则会增加正常加载器计数。
+            Require(after.error.empty() && after.ranges.empty() && after.restoredPages >= before.restoredPages + pagePatchCount, "patched structure invalid");
             const auto patchedHash = HashService::Sha256(target);
             Require(patchedHash != originalHash, "patch had no effect");
             Require(!PatchEngine::Apply(PeScanner::Scan(target), console), "repeat patch accepted");

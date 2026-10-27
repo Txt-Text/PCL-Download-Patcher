@@ -335,10 +335,10 @@ namespace PclFix {
 
         // 根据声明类型、名称、返回值、参数和 this 约定寻找已有成员，不引入版本令牌。
         mdToken Resolve(const std::wstring& owner, const std::wstring& name, const std::wstring& result,
-            const std::vector<std::wstring>& parameters, bool instance = false) const {
+            const std::vector<std::wstring>& parameters, bool instance = false, unsigned generic_count = 0) const {
             LoadSymbols();
             for (const auto& member : m_members) if (member.owner == owner && member.name == name && member.signature.result == result &&
-                member.signature.parameters == parameters && member.signature.instance == instance && !member.signature.genericCount) return member.token;
+                member.signature.parameters == parameters && member.signature.instance == instance && member.signature.genericCount == generic_count) return member.token;
             throw std::runtime_error("缺少修补所需的函数，或函数的参数和返回类型已改变：" + Utf8(owner + L"::" + name));
         }
 
@@ -562,8 +562,18 @@ namespace PclFix {
 
         // 读取 enum 的命名常量，外部依赖与内部枚举共用同一条元数据规则。
         static std::optional<int> EnumLiteral(IMetaDataImport2* metadata, const std::wstring& type, const wchar_t* name) {
-            mdTypeDef definition = 0;
-            if (FAILED(metadata->FindTypeDefByName(type.c_str(), 0, &definition))) return std::nullopt;
+            mdTypeDef definition = 0; // 嵌套枚举须逐层指定所属类型，不能将完整路径当作顶层名称。
+            size_t start = 0; // 当前类型层级在名称中的起点。
+            while (start < type.size()) {
+                const size_t slash = type.find(L'/', start);
+                const auto part = type.substr(start, slash == std::wstring::npos ? slash : slash - start);
+                mdTypeDef next = 0; // 本层查找结果；上一层是所属类型。
+                if (FAILED(metadata->FindTypeDefByName(part.c_str(), definition, &next))) return std::nullopt;
+                definition = next;
+                if (slash == std::wstring::npos) break;
+                start = slash + 1;
+            }
+            if (!definition) return std::nullopt;
             MetadataEnumeration enumeration{metadata}; mdFieldDef items[64]{}; ULONG count = 0;
             while (SUCCEEDED(metadata->EnumFields(&enumeration.handle, definition, items, 64, &count)) && count) {
                 for (ULONG index = 0; index < count; ++index) {
@@ -735,6 +745,18 @@ namespace PclFix {
             clr.Flags &= ~COMIMAGE_FLAGS_STRONGNAMESIGNED; clr.StrongNameSignature = {};
             write(clrOffset, clr); write(directories + IMAGE_DIRECTORY_ENTRY_SECURITY * sizeof(IMAGE_DATA_DIRECTORY), IMAGE_DATA_DIRECTORY{});
             return output;
+        }
+
+        // 从程序集清单读取版本，不加载目标程序，也不依赖文件属性和文件名。
+        TargetVersion GetVersion() const {
+            ComPtr<IMetaDataAssemblyImport> assemblies; // 只借用当前元数据副本。
+            mdAssembly assembly = 0; // 当前程序集清单的编号。
+            ASSEMBLYMETADATA metadata{}; // CLR 返回的四段数值版本。
+            if (FAILED(m_metadata->QueryInterface(IID_IMetaDataAssemblyImport, reinterpret_cast<void**>(assemblies.GetAddressOf()))) || FAILED(assemblies->GetAssemblyFromScope(&assembly)) ||
+                FAILED(assemblies->GetAssemblyProps(assembly, nullptr, nullptr, nullptr, nullptr, 0, nullptr, &metadata, nullptr))) {
+                throw std::runtime_error("无法读取 PCL 程序集版本，已停止修补。");
+            }
+            return {metadata.usMajorVersion, metadata.usMinorVersion, metadata.usBuildNumber, metadata.usRevisionNumber};
         }
 
         // 创建仅供分析和候选镜像生成的元数据副本；不加载或执行目标程序集。

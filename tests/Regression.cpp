@@ -40,7 +40,7 @@ namespace PclFix {
             std::fill_n(bytes.begin() + offset, 4, 0);
         }
 
-        // 缺少一类安装器时必须拒绝整个修补，不能写入其他已经生成的功能点。
+        // 缺少一个安装器时只跳过整合包格式安装，其他功能仍须能修补并还原。
         static void CheckUnsupported(const std::filesystem::path& source, const std::filesystem::path& directory, const Console& console) {
             auto bytes = ReadBytes(source);
             constexpr std::string_view name = "InstallPackModrinth";
@@ -52,14 +52,28 @@ namespace PclFix {
             WriteBytes(broken, bytes);
             const auto info = PeScanner::Scan(broken);
             const auto plan = ManagedPatch::Analyze(broken);
-            Require(!plan.error.empty() && !plan.TotalPoints() && plan.image.empty(), "incomplete recovery accepted");
-            Require(!PatchEngine::Apply(info, console) && HashService::Sha256(broken) == info.hash, "unsupported input changed");
-            Require(!std::filesystem::exists(broken.wstring() + L".pclfix.tmp"), "unsupported input created temporary output");
+            Require(plan.error.empty() && plan.TotalPoints() > 0 && !plan.image.empty(), "one unsupported feature blocked others");
+            Require(plan.SkippedFeatures() == 1 && plan.CountFeature("modpack-dispatcher") == 0, "unsupported dispatch included in plan");
+            Require(BackupManager::Create(broken, console), "partial backup failed");
+            Require(PatchEngine::Apply(info, console), "partial patch failed");
+            const auto after = ManagedPatch::Analyze(broken);
+            Require(PatchRuleCatalog::BuiltIn().Select(*plan.version).features.Verify(plan, after), "partial verification failed");
+            Require(after.TotalPoints() == 0 && after.SkippedFeatures() == 1, "unsupported feature incorrectly marked restored");
+            ManagedPatchContext original, patched;
+            original.Open(broken.wstring() + L".pclfix.bak"); patched.Open(broken);
+            for (const auto& member : original.Symbols()) {
+                if (member.owner != L"PCL.ModModpack" || member.name != L"ModpackInstall" || member.signature.parameters.size() != 3) continue;
+                const auto beforeBody = original.Body(member.token), afterBody = patched.Body(member.token);
+                Require(beforeBody.length == afterBody.length && std::equal(original.BytesView().begin() + beforeBody.offset,
+                    original.BytesView().begin() + beforeBody.offset + beforeBody.length, patched.BytesView().begin() + afterBody.offset), "skipped function changed");
+            }
+            Require(!PatchEngine::Apply(PeScanner::Scan(broken), console), "repeat partial patch accepted");
+            Require(BackupManager::Restore(broken, console) && HashService::Sha256(broken) == info.hash, "partial restore differs");
         }
 
         // 同类中的整合包入口必须分别验证；调换结果顺序也不应影响身份匹配。
         static void CheckFeatureVerification(const PatchAnalysis& before, const PatchAnalysis& after) {
-            const auto& registry = PatchFeatureRegistry::BuiltIn(); // 生产启动时使用的规则集合。
+            const auto& registry = PatchRuleCatalog::BuiltIn().Select(*before.version).features; // 生产启动时使用的规则集合。
             auto reordered = after; // 模拟汇总结果次序改变。
             std::reverse(reordered.features.begin(), reordered.features.end());
             Require(registry.Verify(before, reordered), "verification depends on result order");
@@ -73,21 +87,31 @@ namespace PclFix {
             }
         }
 
-        // 删除必要结构时仍完成其他特征扫描，但必须拒绝生成任何候选写入。
+        // 一个卡片访问器无法识别时，只跳过该功能，仍执行其他已确认的修补。
         static void CheckPartialRecognition(const std::filesystem::path& source, const std::filesystem::path& directory) {
-            auto bytes = ReadBytes(source); // 从输入复制，原样本保持只读。
-            constexpr std::string_view name = "get_CardMinecraft"; // 破坏卡片访问器的语义身份。
+            auto bytes = ReadBytes(source);
+            constexpr std::string_view name = "get_CardMinecraft";
             const auto found = std::search(bytes.begin(), bytes.end(), name.begin(), name.end());
             Require(found != bytes.end(), "card getter metadata not found");
             *(found + name.size() - 1) = 'X';
             ClearChecksum(bytes);
-            const auto target = directory / L"partial-feature.exe"; // 隔离的缺失结构样本。
+            const auto target = directory / L"partial-feature.exe";
             WriteBytes(target, bytes);
-            const auto hash = HashService::Sha256(target); // 检查拒绝操作前后的内容。
-            const auto plan = ManagedPatch::Analyze(target); // 必须保留所有已注册项的扫描记录。
-            Require(!plan.error.empty() && plan.TotalPoints() == 0 && plan.image.empty(), "partial features patched");
-            Require(plan.features.size() == PatchFeatureRegistry::BuiltIn().Features().size(), "partial scan stopped early");
+            const auto hash = HashService::Sha256(target);
+            const auto plan = ManagedPatch::Analyze(target);
+            Require(plan.error.empty() && plan.TotalPoints() > 0 && !plan.image.empty(), "missing feature blocked others");
+            Require(plan.SkippedFeatures() == 1 && plan.CountFeature("modify-minecraft-card") == 0, "missing card included in plan");
+            Require(plan.features.size() == PatchRuleCatalog::BuiltIn().Select(*plan.version).features.Features().size(), "partial scan stopped early");
             Require(HashService::Sha256(target) == hash, "partial scan mutated input");
+            const Console console;
+            Require(BackupManager::Create(target, console) && PatchEngine::Apply(PeScanner::Scan(target), console), "partial recognition apply failed");
+            const auto after = ManagedPatch::Analyze(target);
+            const auto& registry = PatchRuleCatalog::BuiltIn().Select(*plan.version).features;
+            Require(registry.Verify(plan, after) && after.SkippedFeatures() == 1, "skipped card blocked final verification");
+            auto damaged = after;
+            for (auto& feature : damaged.features) if (plan.CountFeature(feature.info.id)) { feature.state = FeatureState::Unsupported; break; }
+            Require(!registry.Verify(plan, damaged), "selected feature verification failure ignored");
+            Require(BackupManager::Restore(target, console) && HashService::Sha256(target) == hash, "partial recognition restore failed");
         }
 
         // 模拟只修补下载页面的旧版本，并验证原始备份保留、附加备份和整体升级。
@@ -135,7 +159,7 @@ namespace PclFix {
             Require(HashService::Sha256(target.wstring() + L".pclfix.bak") == originalHash, "backup differs");
             Require(PatchEngine::Apply(info, console), "patch failed");
             const auto after = ManagedPatch::Analyze(target);
-            Require(PatchFeatureRegistry::BuiltIn().Verify(before, after), "patched structure invalid");
+            Require(PatchRuleCatalog::BuiltIn().Select(*before.version).features.Verify(before, after), "patched structure invalid");
             CheckFeatureVerification(before, after);
             const auto patchedHash = HashService::Sha256(target);
             Require(patchedHash != originalHash, "patch had no effect");

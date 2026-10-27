@@ -1,22 +1,55 @@
 ﻿#pragma once
 #include "IPatchFeature.hpp"
 #include "../ManagedPatchContext.hpp"
+#include <array>
 
 namespace PclFix {
 
     // 负责恢复整合包格式识别后的安装器分发。
     class ModpackDispatcherFeature final : public IPatchFeature {
     private:
+        // 一种整合包格式的识别文件及安装函数；空识别文件表示普通压缩包兜底。
+        struct FormatHandler {
+            const wchar_t* marker; // ZIP 内用于识别格式的文件名。
+            const wchar_t* method; // 目标程序中已有的安装函数名。
+            unsigned arguments; // 格式安装器额外需要的实例名、图标参数个数。
+        };
+
+        // 识别、重建与复检共用此表，最后一项固定为无格式标记的兜底安装器。
+        inline static constexpr std::array<FormatHandler, 7> m_handlers{{
+            {L"manifest.json", L"InstallPackCurseForge", 2},
+            {L"modpack.json", L"InstallPackHMCL", 0},
+            {L"mmc-pack.json", L"InstallPackMMC", 0},
+            {L"mcbbs.packmeta", L"InstallPackMCBBS", 1},
+            {L"modrinth.index.json", L"InstallPackModrinth", 2},
+            {L"modpack.zip", L"InstallPackLauncherPack", 0},
+            {L"", L"InstallPackCompress", 0}
+        }};
+
+        // 被删除安装分支的分发函数没有正常返回路径，格式判断后只会直接抛出异常。
+        // 普通错误处理里的异常不能单独作为拦截依据，后续还会校验全部格式与安装函数。
+        static size_t FindBlockedDispatch(ManagedPatchContext& context, const ManagedPatchContext::MethodBody& body) {
+            const auto& items = body.instructions;
+            if (std::any_of(items.begin(), items.end(), [](const auto& instruction) { return instruction.opcode == 0x2a; })) return items.size();
+            size_t found = items.size(); // 未匹配时返回指令数量。
+            for (size_t index = 0; index + 2 < items.size(); ++index) {
+                if (!IsExceptionThrow(context, body, index)) continue;
+                if (found != items.size()) throw std::runtime_error("找到多个直接报错的位置，无法确定整合包拦截位置。");
+                found = index;
+            }
+            return found;
+        }
+
         // 恢复格式分发时保留目标原有的 ZIP 识别、异常信息和 finally 释放逻辑，只重建被常量删除的尾部。
         static void RecoverModpackDispatch(ManagedPatchContext& context, mdMethodDef method, const ManagedPatchContext::MethodBody& body, const std::wstring& result_type, PatchAnalysis& analysis) {
             const auto locals = context.Locals(body); const auto& instructions = body.instructions;
-            size_t restriction = instructions.size(); int zipSlot = -1, prefixSlot = -1, resultSlot = -1, packSlot = -1;
+            const size_t restriction = FindBlockedDispatch(context, body); int zipSlot = -1, prefixSlot = -1, resultSlot = -1, packSlot = -1;
             std::map<std::wstring, int> formats; // 格式编号从目标自己的识别分支提取。
-            const std::set<std::wstring> signatures = {L"mcbbs.packmeta", L"mmc-pack.json", L"modrinth.index.json", L"manifest.json", L"modpack.json", L"modpack.zip"};
+            std::set<std::wstring> signatures; // 从描述表收集需要在 ZIP 内识别的文件。
+            for (const auto& handler : m_handlers) if (handler.marker[0]) signatures.insert(handler.marker);
             for (size_t index = 0; index < locals.size(); ++index) if (locals[index] == result_type) { if (resultSlot >= 0) throw std::runtime_error("无法准确确定整合包安装结果的保存位置。"); resultSlot = static_cast<int>(index); }
             for (size_t index = 0; index < instructions.size(); ++index) {
                 const auto& instruction = instructions[index]; mdToken owner = 0;
-                if (IsRestriction(context, instruction)) { if (restriction != instructions.size()) throw std::runtime_error("发现多处整合包下载限制，无法确定正确的修改位置。"); restriction = index; }
                 if (instruction.opcode == 0x28 && context.MemberName(instruction.token, owner) == L"OpenZip" && context.TypeName(owner) == L"MeloongCore.FileUtils" && index + 1 < instructions.size()) zipSlot = context.LocalIndex(body, instructions[index + 1], true);
                 if (instruction.opcode != 0x72 || index + 1 >= instructions.size()) continue;
                 const auto text = context.UserString(instruction.token);
@@ -39,36 +72,35 @@ namespace PclFix {
             if (!body.extraSections || restriction == instructions.size() || restriction + 2 >= instructions.size() ||
                 instructions[restriction + 1].opcode != 0x73 || instructions[restriction + 2].opcode != 0x7a ||
                 !validSlot(zipSlot, L"System.IO.Compression.ZipArchive") || !validSlot(prefixSlot, L"string") ||
-                !validSlot(packSlot, L"int32") || resultSlot < 0 || formats.size() != signatures.size()) throw std::runtime_error("整合包格式识别或下载限制的实现方式暂不受支持。");
+                !validSlot(packSlot, L"int32") || resultSlot < 0 || formats.size() != signatures.size()) throw std::runtime_error("整合包格式识别或下载拦截的实现方式暂不受支持。");
             const auto exceptionConstructor = context.Resolve(L"System.Exception", L".ctor", L"void", {L"string"}, true);
-            if (instructions[restriction + 1].token != exceptionConstructor) throw std::runtime_error("下载限制的报错方式与已支持版本不同，无法安全修补。");
+            if (instructions[restriction + 1].token != exceptionConstructor) throw std::runtime_error("下载拦截的报错方式与已支持版本不同，无法安全修补。");
             const size_t begin = instructions[restriction].offset, end = instructions[restriction + 2].offset + instructions[restriction + 2].size;
-            struct FormatHandler { std::wstring marker; std::wstring method; unsigned arguments; }; // 安装函数的额外实例名、图标参数个数。
-            const FormatHandler handlers[] = {{L"manifest.json", L"InstallPackCurseForge", 2}, {L"modpack.json", L"InstallPackHMCL", 0},
-                {L"mmc-pack.json", L"InstallPackMMC", 0}, {L"mcbbs.packmeta", L"InstallPackMCBBS", 1},
-                {L"modrinth.index.json", L"InstallPackModrinth", 2}, {L"modpack.zip", L"InstallPackLauncherPack", 0}};
             std::set<int> values; // 不同格式的分类编号必须唯一，避免错误分发。
             IlAssembler output; const int finish = output.Label(); const int fallback = output.Label(); std::vector<int> labels;
             std::vector<mdToken> calls;
-            for (const auto& handler : handlers) {
-                if (!values.insert(formats.at(handler.marker)).second) throw std::runtime_error("多个整合包格式使用了相同的编号，无法确定对应的安装方式。");
-                std::vector<std::wstring> parameters{L"string", L"System.IO.Compression.ZipArchive", L"string"};
+            for (const auto& handler : m_handlers) {
+                std::vector<std::wstring> parameters{L"string", L"System.IO.Compression.ZipArchive"}; // 所有安装器的公共参数。
+                if (handler.marker[0]) {
+                    if (!values.insert(formats.at(handler.marker)).second) throw std::runtime_error("多个整合包格式使用了相同的编号，无法确定对应的安装方式。");
+                    parameters.push_back(L"string"); // 具名格式需要归档内路径前缀，兜底安装器不需要。
+                    labels.push_back(output.Label());
+                }
                 for (unsigned index = 0; index < handler.arguments; ++index) parameters.push_back(L"string");
-                calls.push_back(context.Resolve(L"PCL.ModModpack", handler.method, result_type, parameters)); labels.push_back(output.Label());
+                calls.push_back(context.Resolve(L"PCL.ModModpack", handler.method, result_type, parameters));
             }
-            const auto compress = context.Resolve(L"PCL.ModModpack", L"InstallPackCompress", result_type, {L"string", L"System.IO.Compression.ZipArchive"});
             for (const auto& instruction : instructions) {
                 if (instruction.offset == begin) {
                     output.Mark(static_cast<int>(begin));
-                    for (size_t index = 0; index < labels.size(); ++index) { output.Local(false, packSlot); output.Integer(formats.at(handlers[index].marker)); output.Branch(0x3b, labels[index]); }
+                    for (size_t index = 0; index < labels.size(); ++index) { output.Local(false, packSlot); output.Integer(formats.at(m_handlers[index].marker)); output.Branch(0x3b, labels[index]); }
                     output.Branch(0x38, fallback);
                     for (size_t index = 0; index < labels.size(); ++index) {
                         output.Mark(labels[index]); output.Op(0x02); output.Local(false, zipSlot); output.Local(false, prefixSlot);
-                        if (handlers[index].arguments >= 1) output.Op(0x03);
-                        if (handlers[index].arguments >= 2) output.Op(0x04);
+                        if (m_handlers[index].arguments >= 1) output.Op(0x03);
+                        if (m_handlers[index].arguments >= 2) output.Op(0x04);
                         output.Token(0x28, calls[index]); output.Local(true, resultSlot); output.Branch(0xdd, finish);
                     }
-                    output.Mark(fallback); output.Op(0x02); output.Local(false, zipSlot); output.Token(0x28, compress); output.Local(true, resultSlot); output.Branch(0xdd, finish);
+                    output.Mark(fallback); output.Op(0x02); output.Local(false, zipSlot); output.Token(0x28, calls.back()); output.Local(true, resultSlot); output.Branch(0xdd, finish);
                 }
                 if (instruction.offset < begin || instruction.offset >= end) context.CopyInstruction(output, body, instruction);
             }
@@ -87,9 +119,7 @@ namespace PclFix {
             if (dispatch == entries.end()) throw std::runtime_error("未找到根据整合包格式选择安装方式的功能。");
             const auto& entry = *dispatch;
             const auto body = context.Body(entry.token);
-            const bool restricted = std::any_of(body.instructions.begin(), body.instructions.end(), [&context](const auto& instruction) {
-                return IsRestriction(context, instruction);
-            });
+            const bool restricted = FindBlockedDispatch(context, body) != body.instructions.size();
             if (!restricted) {
                 if (!body.extraSections) throw std::runtime_error("整合包安装功能缺少预期的异常处理代码，无法确认其是否完整。");
                 std::set<std::wstring> calls;
@@ -99,14 +129,13 @@ namespace PclFix {
                     const auto name = context.MemberName(instruction.token, owner);
                     if (context.TypeName(owner) == L"PCL.ModModpack") calls.insert(name);
                 }
-                if (!calls.contains(L"InstallPackCurseForge") || !calls.contains(L"InstallPackHMCL") ||
-                    !calls.contains(L"InstallPackMMC") || !calls.contains(L"InstallPackMCBBS") ||
-                    !calls.contains(L"InstallPackModrinth") || !calls.contains(L"InstallPackLauncherPack") ||
-                    !calls.contains(L"InstallPackCompress")) throw std::runtime_error("整合包安装功能不完整或已被改动，无法确认是否正常。");
+                for (const auto& handler : m_handlers) {
+                    if (!calls.contains(handler.method)) throw std::runtime_error("整合包安装功能不完整或已被改动，无法确认是否正常。");
+                }
                 ++analysis.restoredCount;
                 return;
             }
-            if (entry.signature.result != L"PCL.ModLoader/LoaderCombo`1<string>") throw std::runtime_error("整合包安装函数的参数或返回类型已改变，此版本暂不支持修补。");
+            if (entry.signature.result != L"PCL.ModLoader/LoaderCombo`1<string>") throw std::runtime_error("整合包安装函数的参数或返回类型已改变，无法安全修补。");
             if (!build_patch) { analysis.methods.push_back({}); return; }
             RecoverModpackDispatch(context, entry.token, body, entry.signature.result, analysis);
         }

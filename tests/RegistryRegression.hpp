@@ -58,6 +58,67 @@ namespace PclFix {
             }
         };
 
+        // 模拟扫描失败，以及写入了部分元数据后才失败的功能。
+        class FailingFeature final : public IPatchFeature {
+        private:
+            bool m_scanFails; // 区分扫描失败与计划生成失败。
+
+        public:
+            explicit FailingFeature(bool scan_fails) : m_scanFails(scan_fails) {}
+
+            PatchFeatureInfo Describe() const override {
+                return {m_scanFails ? "scan-failure" : "patch-failure", "失败隔离测试", PatchPointKind::DownloadPage, true};
+            }
+
+            FeatureScanResult Scan(ManagedPatchContext&) const override {
+                if (m_scanFails) throw std::runtime_error("expected scan failure");
+                FeatureScanResult result;
+                result.info = Describe(); result.state = FeatureState::Restricted;
+                result.detectedCount = result.patchableCount = 1;
+                return result;
+            }
+
+            void Patch(ManagedPatchContext& context, const FeatureScanResult&, PatchAnalysis& analysis) const override {
+                context.StringToken(L"FAILED_FEATURE_METADATA_MUST_NOT_LEAK");
+                analysis.ranges.push_back({0, {0x4d}, {0x00}}); // 在失败前还加入一个必须丢弃的文件头修改。
+                throw std::runtime_error("expected patch generation failure");
+            }
+
+            bool Verify(const PatchAnalysis&, const FeatureScanResult&) const override {
+                throw std::runtime_error("skipped feature must not be verified");
+            }
+        };
+
+        // 重建一个原样函数，让测试候选确实保存元数据，避免漏掉失败功能留下的字符串。
+        class MetadataFeature final : public IPatchFeature {
+        public:
+            PatchFeatureInfo Describe() const override { return {"metadata-success", "元数据隔离测试", PatchPointKind::DownloadPage, true}; }
+
+            FeatureScanResult Scan(ManagedPatchContext&) const override {
+                FeatureScanResult result;
+                result.info = Describe(); result.state = FeatureState::Restricted;
+                result.detectedCount = result.patchableCount = 1;
+                return result;
+            }
+
+            void Patch(ManagedPatchContext& context, const FeatureScanResult&, PatchAnalysis& analysis) const override {
+                const auto type = context.ResolveType(L"PCL.PageDownloadInstall");
+                const auto method = context.FindNamedMethod(type, L"LoaderInit");
+                const auto body = context.Body(method);
+                IlAssembler output;
+                for (const auto& instruction : body.instructions) context.CopyInstruction(output, body, instruction);
+                output.Mark(static_cast<int>(body.length));
+                context.StringToken(L"SUCCESS_FEATURE_METADATA");
+                analysis.methods.push_back(context.Assemble(method, body, output, PatchPointKind::DownloadPage));
+            }
+
+            bool Verify(const PatchAnalysis& after, const FeatureScanResult& result) const override {
+                return std::any_of(after.features.begin(), after.features.end(), [&result](const auto& feature) {
+                    return feature.info.id == result.info.id && feature.state == FeatureState::Restored;
+                });
+            }
+        };
+
         // 所有断言失败都明确终止测试，不把部分成功报告为通过。
         static void Require(bool condition, const char* message) {
             if (!condition) throw std::runtime_error(message);
@@ -98,6 +159,32 @@ namespace PclFix {
             conflict.Register(std::make_unique<ProbeFeature>("conflict-b", 0, calls));
             const auto invalid = ManagedPatch::Analyze(source_path, {}, conflict); // 冲突必须在文件写入前发现。
             Require(!invalid.error.empty() && invalid.image.empty() && !invalid.TotalPoints(), "overlapping plans accepted");
+
+            PatchFeatureRegistry isolated; // 故意让正常功能先生成，再触发失败，验证重建与重放。
+            isolated.Register(std::make_unique<MetadataFeature>());
+            isolated.Register(std::make_unique<FailingFeature>(true));
+            isolated.Register(std::make_unique<FailingFeature>(false));
+            const auto partial = ManagedPatch::Analyze(source_path, {}, isolated);
+            Require(partial.error.empty() && partial.TotalPoints() == 1 && partial.SkippedFeatures() == 2 && !partial.image.empty(), "feature failures blocked valid plan");
+            const std::wstring sentinel = L"FAILED_FEATURE_METADATA_MUST_NOT_LEAK";
+            const auto* sentinelBytes = reinterpret_cast<const unsigned char*>(sentinel.data());
+            Require(std::search(partial.image.begin(), partial.image.end(), sentinelBytes, sentinelBytes + sentinel.size() * sizeof(wchar_t)) == partial.image.end(), "failed metadata leaked into output");
+            Require(partial.image[0] == 0x4d && partial.image[1] == 0x5a, "failed byte patch leaked into output");
+            auto partialAfter = partial;
+            partialAfter.methods.clear(); partialAfter.image.clear();
+            for (auto& feature : partialAfter.features) {
+                if (feature.info.id != "metadata-success") continue;
+                feature.state = FeatureState::Restored; feature.restoredCount = 1; feature.patchableCount = 0;
+            }
+            Require(isolated.Verify(partial, partialAfter), "skipped feature blocked verification");
+            partialAfter.features.front().state = FeatureState::Unsupported;
+            Require(!isolated.Verify(partial, partialAfter), "modified feature verification was skipped");
+
+            PatchFeatureRegistry allSkipped; // 全部失败时不能生成空操作候选，也不能把跳过当成恢复。
+            allSkipped.Register(std::make_unique<FailingFeature>(true));
+            allSkipped.Register(std::make_unique<FailingFeature>(false));
+            const auto noChanges = ManagedPatch::Analyze(source_path, {}, allSkipped);
+            Require(noChanges.error.empty() && noChanges.SkippedFeatures() == 2 && noChanges.TotalPoints() == 0 && noChanges.image.empty(), "all-skipped scan generated output");
         }
     };
 

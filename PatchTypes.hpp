@@ -1,10 +1,12 @@
 ﻿#pragma once
 #include <windows.h>
+#include "TargetVersion.hpp"
 #include <cor.h>
 #include <algorithm>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <optional>
 
 namespace PclFix {
 
@@ -13,6 +15,7 @@ namespace PclFix {
         DownloadPage, // Minecraft 下载页面的正常加载器绑定。
         ModpackDownload, // 整合包安装入口。
         ModifyPage, // 修改已有实例页面的 Minecraft 卡片。
+        DownloadEntries, // 下载导航、整合包导入和游戏更新按钮。
         ResourceInstall // 资源详情列表的安装入口。
     };
 
@@ -22,6 +25,7 @@ namespace PclFix {
         case PatchPointKind::DownloadPage: return "下载页面";
         case PatchPointKind::ModpackDownload: return "整合包下载";
         case PatchPointKind::ModifyPage: return "修改页面的 Minecraft 选项";
+        case PatchPointKind::DownloadEntries: return "下载相关入口";
         case PatchPointKind::ResourceInstall: return "资源安装入口";
         default: return "未知修补点";
         }
@@ -40,7 +44,7 @@ namespace PclFix {
         std::string id; // 供补丁范围与验证结果关联的稳定名称。
         std::string name = "未知修补点"; // 面向用户的名称由描述结构拥有，支持运行时注册。
         PatchPointKind category = PatchPointKind::DownloadPage; // 所属功能类别。
-        bool required = true; // 是否属于完整恢复所必须的功能。
+        bool required = true; // 已确认正常的此功能，也须验证未被其他修改破坏；未知功能仍允许跳过。
     };
 
     // 一次扫描得到的具体特征结果；不会保存跨文件的可变状态。
@@ -73,6 +77,9 @@ namespace PclFix {
 
     // 解析结果同时用于界面显示、事务写入和修补后验证。
     struct PatchAnalysis {
+        std::optional<TargetVersion> version; // 从目标程序集读取的版本，读取失败时不猜测。
+        std::string ruleId; // 选定规则的稳定身份，确保写入前后使用同一套检查。
+        std::string ruleName; // 本次扫描所采用的版本规则说明。
         std::vector<PatchRange> ranges; // 各功能类别中已经验证的等长修改。
         std::vector<MethodReplacement> methods; // 需要迁移并重建的方法。
         size_t restoredCount = 0; // 特征局部分析时记录已经正常的结构数。
@@ -111,7 +118,14 @@ namespace PclFix {
             return count;
         }
 
-        // 仅统计已生成且能够完整写入的修补点，不能恢复的结构会产生错误。
+        // 未识别和结构不支持均表示跳过，不能当成下载功能已经正常。
+        size_t SkippedFeatures() const {
+            return static_cast<size_t>(std::count_if(features.begin(), features.end(), [](const auto& feature) {
+                return feature.state == FeatureState::NotFound || feature.state == FeatureState::Unsupported;
+            }));
+        }
+
+        // 仅统计已生成的修改；被跳过的功能不占用修补数量。
         size_t TotalPoints() const { return ranges.size() + methods.size(); }
     };
 

@@ -8,10 +8,10 @@ using System.Reflection;
 using System.Threading;
 
 #if REORDER
-[assembly: AssemblyVersion("7.6.5.4")]
+[assembly: AssemblyVersion("2.99.0.0")]
 namespace Padding { public class Earlier { public static string Text = "metadata order changed"; public void Unrelated() {} } }
 #else
-[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyVersion("2.99.0.0")]
 #endif
 
 namespace System.Windows {

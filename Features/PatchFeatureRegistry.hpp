@@ -1,10 +1,5 @@
 ﻿#pragma once
 #include "IPatchFeature.hpp"
-#include "DownloadPageLoaderFeature.hpp"
-#include "ModpackPickerFeature.hpp"
-#include "ModpackDispatcherFeature.hpp"
-#include "ModifyMinecraftCardFeature.hpp"
-#include "ResourceInstallFeature.hpp"
 #include <memory>
 
 namespace PclFix {
@@ -29,23 +24,9 @@ namespace PclFix {
         // 返回只读注册集合，调用者不能转移内部对象的所有权。
         const std::vector<std::unique_ptr<IPatchFeature>>& Features() const { return m_features; }
 
-        // 内置功能仅在此注册；程序启动时初始化，后续各文件复用同一组规则。
-        static const PatchFeatureRegistry& BuiltIn() {
-            static const PatchFeatureRegistry registry = [] {
-                PatchFeatureRegistry result; // 初始化完成后只读发布的注册集合。
-                result.Register(std::make_unique<DownloadPageLoaderFeature>());
-                result.Register(std::make_unique<ModpackPickerFeature>());
-                result.Register(std::make_unique<ModpackDispatcherFeature>());
-                result.Register(std::make_unique<ModifyMinecraftCardFeature>());
-                result.Register(std::make_unique<ResourceInstallFeature>());
-                return result;
-            }();
-            return registry;
-        }
-
         // 按稳定身份关联前后结果，不依赖类别数量或注册次序。
         bool Verify(const PatchAnalysis& before, const PatchAnalysis& after) const {
-            if (!before.error.empty() || !after.error.empty() || after.TotalPoints() ||
+            if (before.ruleId != after.ruleId || before.version != after.version || !before.error.empty() || !after.error.empty() ||
                 before.features.size() != m_features.size() || after.features.size() != m_features.size()) return false;
             for (const auto& feature : m_features) {
                 const auto info = feature->Describe(); // 本轮验证所对应的注册身份。
@@ -53,11 +34,10 @@ namespace PclFix {
                     [&info](const auto& item) { return item.info.id == info.id; });
                 const auto verified = std::find_if(after.features.begin(), after.features.end(),
                     [&info](const auto& item) { return item.info.id == info.id; });
-                if (found == before.features.end() || verified == after.features.end() ||
-                    found->state == FeatureState::Unsupported || verified->state == FeatureState::Unsupported ||
-                    verified->state == FeatureState::Restricted || verified->patchableCount ||
-                    (info.required && verified->state != FeatureState::Restored) ||
-                    !feature->Verify(after, *found)) return false;
+                if (found == before.features.end() || verified == after.features.end()) return false;
+                const bool modified = before.CountFeature(info.id) > 0; // 验证范围来自实际修改计划，不能靠扫描数量猜测。
+                if (!modified && !(info.required && found->state == FeatureState::Restored)) continue;
+                if (verified->state != FeatureState::Restored || verified->patchableCount || !feature->Verify(after, *found)) return false;
             }
             return true;
         }

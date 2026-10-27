@@ -20,7 +20,7 @@
 #pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "Bcrypt.lib")
 
-#define PCL_DOWNLOAD_PATCHER_VERSION "v1.1"
+#define PCL_DOWNLOAD_PATCHER_VERSION "v1.1.0"
 #define PCL_DOWNLOAD_PATCHER_AUTHOR "Txt_Text"
 
 namespace {
@@ -238,7 +238,7 @@ namespace {
 
         // 每类功能均需从待修补转为可验证的正常结构，不能用“没有字节补丁”代替功能完成。
         static bool Verified(const PclFix::PatchAnalysis& before, const PclFix::PatchAnalysis& after) {
-            return PclFix::PatchFeatureRegistry::BuiltIn().Verify(before, after);
+            return before.version && before.version == after.version && PclFix::PatchRuleCatalog::BuiltIn().Select(*before.version).features.Verify(before, after);
         }
 
     public:
@@ -249,26 +249,36 @@ namespace {
             // 合并同类别下连续注册的具体特征进度。
             std::optional<PclFix::PatchPointKind> scanning; 
             const auto analysis = PclFix::ManagedPatch::Analyze(info.path, [&console, &scanning](PclFix::PatchPointKind kind) {
-                if (scanning != kind) console.Line("正在扫描 PCL 可执行文件... " + std::string(PclFix::PatchPointName(kind)), Console::Level::Info);
+                if (scanning != kind) console.Line("扫描 " + std::string(PclFix::PatchPointName(kind)) + "...", Console::Level::Info);
                 scanning = kind;
             });
+            if (analysis.version) console.Line("PCL 程序集版本：" + analysis.version->ToString() + "，检查规则：" + analysis.ruleName, Console::Level::Info);
+            if (!analysis.warning.empty()) console.Line(analysis.warning, Console::Level::Warn);
+            console.Line("", Console::Level::None); // 扫描进度与分类结果之间留一行。
             size_t recognized = 0; // 识别到结构或明确的不兼容点时，不能声称完全未发现。
             for (const auto category : analysis.Categories()) {
-                console.Line(std::string(PclFix::PatchPointName(category)), Console::Level::Info);
+                console.Line(std::string(PclFix::PatchPointName(category)) + "：", Console::Level::Info, Console::Color::Orange);
                 for (const auto& feature : analysis.features) {
                     if (feature.info.category != category) continue;
-                    const char* state = "未识别";  // 未匹配。
-                    Console::Level level = Console::Level::Error; // 未知和不支持的结构按错误显示。
+                    const char* state = "已跳过（未识别）";  // 未匹配。
+                    Console::Level level = Console::Level::Warn; // 跳过属于警告，不阻止其他功能修补。
+                    Console::Color stateColor = Console::Color::Yellow; // 状态文字独立着色，功能名称保持等级默认颜色。
                     if (feature.state != PclFix::FeatureState::NotFound) ++recognized;
                     if (feature.state == PclFix::FeatureState::Restricted) {
-                        state = "需要修补"; level = Console::Level::Info;
+                        state = "需要修补"; level = Console::Level::Info; stateColor = Console::Color::Yellow;
                     } else if (feature.state == PclFix::FeatureState::Restored) {
-                        state = "已恢复"; level = Console::Level::Success;
-                    } else if (feature.state == PclFix::FeatureState::Unsupported) state = "暂不支持修补";
+                        state = "无需修补"; level = Console::Level::Info; stateColor = Console::Color::Green;
+                    } else if (feature.state == PclFix::FeatureState::Unsupported) state = "已跳过（结构不支持）";
                     console.Write("    ", Console::Level::None); // 缩进只用于区分类别和具体功能。
-                    console.Line(feature.info.name + "：" + state, level);
+                    console.Write(feature.info.name + "：", level);
+                    console.Line(state, Console::Level::None, stateColor);
+                    if (!feature.reason.empty()) {
+                        console.Write("        ", Console::Level::None);
+                        console.Line(feature.reason, Console::Level::Warn);
+                    }
                 }
             }
+            console.Line("", Console::Level::None); // 分类结果与扫描总结或报错之间留一行。
             if (!recognized) {
                 console.Line("未识别到受支持的特征，可能目标是已修补版本、社区版或其他改版，也可能是尚未支持的版本。", Console::Level::Error);
                 if (!analysis.error.empty() && analysis.error != "未识别到受支持的特征。") console.Line(analysis.error, Console::Level::Error);
@@ -276,9 +286,8 @@ namespace {
             }
             if (!analysis.error.empty()) { console.Line(analysis.error, Console::Level::Error); return false; }
             if (!analysis.TotalPoints()) {
-                if (!analysis.warning.empty()) {
-                    console.Line(analysis.warning, Console::Level::Warn);
-                    console.Line("已识别到的下载功能无需修补。", Console::Level::Info);
+                if (analysis.SkippedFeatures()) {
+                    console.Line("没有可确定需要修补的功能；未识别或不支持的功能已跳过。", Console::Level::Info);
                     return false;
                 }
                 console.Line("目标下载功能全部正常，无需重复修补。", Console::Level::Success);
@@ -290,15 +299,14 @@ namespace {
                 if (count) console.Line(std::string(PclFix::PatchPointName(kind)) + "：" + std::to_string(count) + " 个", Console::Level::Info);
             }
 
-            if (!analysis.warning.empty()) console.Line(analysis.warning, Console::Level::Warn);
             return true;
         }
 
-        // 分类报告已生成的补丁计划，临时文件通过全部功能结构验证后才替换目标。
+        // 分类报告已生成的计划，本次实际修改的功能验证成功后才替换目标。
         static bool Apply(const FileInfo& info, const Console& console) {
             const auto analysis = PclFix::ManagedPatch::Analyze(info.path);
             if (!analysis.error.empty() || !analysis.TotalPoints()) {
-                console.Line(analysis.error.empty() ? "无需重复修补。" : analysis.error, analysis.error.empty() ? Console::Level::Info : Console::Level::Error);
+                console.Line(!analysis.error.empty() ? analysis.error : (analysis.SkippedFeatures() ? "没有可确定修补的功能，未修改文件。" : "无需重复修补。"), analysis.error.empty() ? Console::Level::Info : Console::Level::Error);
                 return false;
             }
             const auto& bytes = analysis.image; // 分析器同时生成等长修改和完整方法恢复的候选镜像。
@@ -327,8 +335,9 @@ namespace {
             const auto finalCheck = PclFix::ManagedPatch::Analyze(info.path);
             success = Verified(analysis, finalCheck);
             if (success) {
-                for (const auto kind : categories) if (analysis.Count(kind)) console.Line(std::string(PclFix::PatchPointName(kind)) + "：修补完成，验证通过。", Console::Level::Success);
-                console.Line("修补完成。", Console::Level::Success);
+                for (const auto kind : categories) if (analysis.Count(kind)) console.Line(std::string(PclFix::PatchPointName(kind)) + "：本次修补完成，验证通过。", Console::Level::Success);
+                if (analysis.SkippedFeatures()) console.Line("本次可修补的功能已完成，另有 " + std::to_string(analysis.SkippedFeatures()) + " 项功能跳过，无法确认全部下载功能均已恢复。", Console::Level::Warn);
+                else console.Line("修补完成。", Console::Level::Success);
                 if (!finalCheck.warning.empty()) console.Line(finalCheck.warning, Console::Level::Warn);
             } else console.Line("替换后验证失败，请使用备份还原。", Console::Level::Error);
             return success;
@@ -494,23 +503,27 @@ namespace {
             if (!info.validPe) { m_console.Line("PE 头校验失败，这不是一个有效的EXE文件。", Console::Level::Error); Pause(); return; }
             if (info.checksumError) { m_console.Line("校验码校验失败，可能是文件已损坏或被修改。", Console::Level::Error); Pause(); return; }
             m_console.Line("SHA-256: " + info.hash, Console::Level::Info);
+
             // 具体鉴权特征由注册的修补点扫描，不依赖程序集字符串标记。
-            if (!PatchEngine::CanPatch(info, m_console)) { Pause(); return; }
-            m_console.Line("按 Enter 创建备份并开始修补，按 ESC 取消。", Console::Level::Info, Console::Color::Orange);
+            if (!PatchEngine::CanPatch(info, m_console)) { 
+                Pause(); return; 
+            }
+
+            m_console.Line("按 [Enter] 创建备份并开始修补，按 [ESC] 取消。", Console::Level::Info, Console::Color::Orange);
             const int confirm = m_console.ReadKey();
             if (confirm != 13) { m_console.Line("已取消。", Console::Level::Info); Pause(); return; }
             const auto processRunning = ProcessGuard::IsRunning(info.path);
             if (!processRunning) {
-                m_console.Line("无法检查 PCL 进程状态，已停止修补。", Console::Level::Error);
+                m_console.Line("无法检查 PCL 进程状态，停止修补。", Console::Level::Error);
                 Pause(); return;
             }
             if (*processRunning) {
-                m_console.Line("检测到 PCL 正在运行，请先退出 PCL 后重试。", Console::Level::Error);
+                m_console.Line("检测到 PCL 正在运行，请退出 PCL 后重试。", Console::Level::Error);
                 Pause(); return;
             }
             const auto beforeWrite = PeScanner::Scan(info.path);
             if (!beforeWrite.validPe || beforeWrite.checksumError || beforeWrite.hash != info.hash) {
-                m_console.Line("文件在确认后发生变化，已取消修补。", Console::Level::Error);
+                m_console.Line("文件在确认后发生变化，取消修补。", Console::Level::Error);
                 Pause(); return;
             }
             if (!BackupManager::Create(info.path, m_console)) { Pause(); return; }
@@ -518,30 +531,43 @@ namespace {
             Pause();
         }
 
-        void BackupRestore() {
-            const int operation = Menu({"备份PCL", "还原PCL", "返回"});
-            if (operation < 0 || operation == 2) return;
-            const auto selected = PickFile(); // 备份与还原同样只使用文件选择窗口。
+        // 从主菜单直接选择文件并创建备份。
+        void BackupPcl() {
+            const auto selected = PickFile(); // 备份目标由用户选择。
             if (!selected) return;
-            const auto info = PeScanner::Scan(*selected);
-            // 还原时允许当前 EXE 损坏；需要校验的是待恢复的备份。
-            if (operation == 0 && (!info.validPe || info.checksumError)) { m_console.Line("PE头或校验码校验失败。", Console::Level::Error); Pause(); return; }
-            const auto running = ProcessGuard::IsRunning(info.path);
+            const auto info = PeScanner::Scan(*selected); // 备份前检查当前 EXE 是否有效。
+            if (!info.validPe || info.checksumError) { m_console.Line("PE 头或校验码校验失败。", Console::Level::Error); Pause(); return; }
+            const auto running = ProcessGuard::IsRunning(info.path); // 运行中的文件不进行备份。
             if (!running || *running) { m_console.Line("PCL 正在运行或进程状态不可确认，已停止操作。", Console::Level::Error); Pause(); return; }
-            if (operation == 0) BackupManager::Create(info.path, m_console);
-            else {
-                m_console.Line("按 Enter 确认覆盖当前文件，按 ESC 取消。", Console::Level::Info, Console::Color::Orange);
-                if (m_console.ReadKey() == 13) BackupManager::Restore(info.path, m_console);
-                else m_console.Line("已取消还原。", Console::Level::Info);
-            }
+            BackupManager::Create(info.path, m_console);
+            Pause();
+        }
+
+        // 从主菜单直接选择待还原文件，覆盖前仍需要确认。
+        void RestorePcl() {
+            const auto selected = PickFile(); // 还原时允许当前 EXE 损坏；由还原流程校验备份。
+            if (!selected) return;
+            const auto running = ProcessGuard::IsRunning(*selected); // 避免覆盖正在运行的 PCL。
+            if (!running || *running) { m_console.Line("PCL 正在运行或进程状态不可确认，已停止操作。", Console::Level::Error); Pause(); return; }
+            m_console.Line("按 [Enter] 确认覆盖当前文件，按 [ESC] 取消。", Console::Level::Info, Console::Color::Orange);
+            if (m_console.ReadKey() == 13) BackupManager::Restore(*selected, m_console);
+            else m_console.Line("已取消还原。", Console::Level::Info);
             Pause();
         }
 
     public:
         int Run() {
-            (void)PclFix::PatchFeatureRegistry::BuiltIn(); // 启动时完成内置特征注册。
+            (void)PclFix::PatchRuleCatalog::BuiltIn(); // 启动时注册版本规则及各自的修补功能。
             SetConsoleOutputCP(CP_UTF8);
-            while (true) { const int choice = Menu({"选择并修补PCL", "备份或还原PCL"}); if (choice < 0) return 0; if (choice == 0) PatchPcl(); else BackupRestore(); }
+            while (true) {
+                const int choice = Menu({"修补PCL", "还原PCL", "备份PCL"}); // 主菜单直接进入对应操作。
+                if (choice < 0) return 0;
+                switch (choice) {
+                case 0: PatchPcl(); break;
+                case 1: RestorePcl(); break;
+                case 2: BackupPcl(); break;
+                }
+            }
         }
     };
 }

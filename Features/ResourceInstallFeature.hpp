@@ -53,7 +53,7 @@ namespace PclFix {
             const auto listConstructor = context.Resolve(L"PCL.MyListItem/ClickEventHandler", L".ctor", L"void", {L"object", L"native int"}, true);
             const auto iconConstructor = context.Resolve(L"PCL.MyIconButton/ClickEventHandler", L".ctor", L"void", {L"object", L"native int"}, true);
             const auto invoke = context.FindNamedMethod(static_cast<mdTypeDef>(context.ResolveType(L"PCL.MyListItem/ClickEventHandler")), L"Invoke");
-            if (!invoke) throw std::runtime_error("无法读取资源列表按钮的点击处理方式，此版本暂不支持修补。");
+            if (!invoke) throw std::runtime_error("无法读取资源列表按钮的点击处理方式，无法修补。");
             const auto adapter = ResourceInstallAdapter(context, page, install, context.Signature(invoke).parameters);
             const auto field = context.ResolveField(page, L"TargetResourceType", context.FieldTypeByName(page, L"TargetResourceType"));
             const int modpackValue = ResourceModpackValue(context, field);

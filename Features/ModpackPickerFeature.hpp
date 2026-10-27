@@ -83,6 +83,22 @@ namespace PclFix {
             analysis.methods.push_back(context.Assemble(method, body, output, PatchPointKind::ModpackDownload));
         }
 
+        // 拦截入口只创建闭包、显示提示并返回，正常的文件选择和后台安装代码已被删除。
+        // 不依赖提示内容；其余闭包、文件字段、回调和 API 签名仍由恢复阶段完整校验。
+        static bool IsBlockedPicker(ManagedPatchContext& context, const ManagedPatchContext::MethodBody& body) {
+            const auto& items = body.instructions; // 已知拦截入口的完整七条指令。
+            if (body.extraSections || items.size() != 7 || items[0].opcode != 0x73 || context.LocalIndex(body, items[1], true) != 0 ||
+                items[2].opcode != 0x72 || !context.IntegerValue(body, items[3]) || context.IntegerValue(body, items[4]) != 1 ||
+                items[5].opcode != 0x28 || items[6].opcode != 0x2a) return false;
+            mdToken owner = 0; // 显示提示的必须是 PCL 自身 Hint 函数。
+            if (context.MemberName(items[5].token, owner) != L"Hint" || context.TypeName(owner) != L"PCL.ModMain") return false;
+            const auto signature = context.Signature(items[5].token);
+            if (signature.instance || signature.result != L"void" || signature.parameters.size() != 3 ||
+                signature.parameters.front() != L"string" || signature.parameters.back() != L"bool") return false;
+            const auto red = context.EnumLiteral(context.Metadata(), signature.parameters[1], L"Red"); // 提示类别取自目标枚举，避免固定编号。
+            return red && context.IntegerValue(body, items[3]) == *red;
+        }
+
         // 只处理无参数的整合包文件选择入口。
         static void AnalyzeType(ManagedPatchContext& context, mdTypeDef type, PatchAnalysis& analysis, bool build_patch) {
             context.LoadSymbols();
@@ -95,9 +111,7 @@ namespace PclFix {
             for (const auto& entry : entries) {
                 if (entry.signature.instance || !entry.signature.parameters.empty() || entry.signature.result != L"void") continue;
                 const auto body = context.Body(entry.token);
-                const bool restricted = std::any_of(body.instructions.begin(), body.instructions.end(), [&context](const auto& instruction) {
-                    return IsRestriction(context, instruction);
-                });
+                const bool restricted = IsBlockedPicker(context, body);
                 if (!restricted) {
                     bool picker = false;
                     bool background = false; // 文件选择和后台安装调用都必须存在。
@@ -108,7 +122,7 @@ namespace PclFix {
                         if (name == L"SelectFile" && context.TypeName(owner) == L"MeloongCore.Wpf.Dialogs") picker = true;
                         if (name == L"RunInThread" && context.TypeName(owner) == L"PCL.ModBase") background = true;
                     }
-                    if (!picker || !background) throw std::runtime_error("整合包文件选择功能既未匹配到下载限制，也未匹配到完整的正常实现。");
+                    if (!picker || !background) throw std::runtime_error("整合包文件选择功能既未匹配到下载拦截，也未匹配到完整的正常实现。");
                     ++analysis.restoredCount;
                     continue;
                 }

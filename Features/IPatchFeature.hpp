@@ -10,9 +10,15 @@ namespace PclFix {
     // 每个下载功能修补模块都实现此类。
     class IPatchFeature {
     protected:
-        // 仅在实际限制提示出现时重建，不以版本号或普通下载文字判定受限。
-        static bool IsRestriction(ManagedPatchContext& context, const ManagedPatchContext::Instruction& instruction) {
-            return instruction.opcode == 0x72 && context.UserString(instruction.token).find(L"PCL 暂时不再提供 MC 下载功能") != std::wstring::npos;
+        // 检查“加载提示字符串、构造异常、抛出”的指令与签名，不读取提示文字的内容。
+        // 此辅助函数只确认报错结构；是否属于下载拦截由各功能的调用关系和完整结构决定。
+        static bool IsExceptionThrow(ManagedPatchContext& context, const ManagedPatchContext::MethodBody& body, size_t index) {
+            const auto& items = body.instructions; // 当前目标函数的已解码指令。
+            if (index + 2 >= items.size() || items[index].opcode != 0x72 || items[index + 1].opcode != 0x73 || items[index + 2].opcode != 0x7a) return false;
+            mdToken owner = 0; // 异常构造函数的声明类型。
+            if (context.MemberName(items[index + 1].token, owner) != L".ctor" || context.TypeName(owner) != L"System.Exception") return false;
+            const auto signature = context.Signature(items[index + 1].token); // 只接受单字符串参数构造函数。
+            return signature.instance && signature.result == L"void" && signature.parameters == std::vector<std::wstring>{L"string"};
         }
 
     public:
@@ -32,5 +38,4 @@ namespace PclFix {
         virtual bool Verify(const PatchAnalysis& analysis,
             const FeatureScanResult& result) const = 0;
     };
-
 }

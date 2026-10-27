@@ -59,5 +59,38 @@
     <ClInclude Include="Features\ResourceInstallFeature.hpp">
       <Filter>头文件\Features</Filter>
     </ClInclude>
+    <ClInclude Include="TargetVersion.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PatchRuleCatalog.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\DisabledModDownloadFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\DownloadNavigationFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\DownloadVisibilityCode.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\EmptyListDownloadFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\LaunchDownloadFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\MethodPatchFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\ModpackImportFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\ModpackSearchFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
+    <ClInclude Include="Features\UpdateDownloadFeature.hpp">
+      <Filter>头文件\Features</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

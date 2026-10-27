@@ -71,7 +71,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <IntDir>$(ProjectDir)build\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(ProjectDir)build\bin\$(Platform)\$(Configuration)\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -150,6 +151,17 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ManagedPatch.h" />
+    <ClInclude Include="ManagedPatchContext.hpp" />
+    <ClInclude Include="PatchTypes.hpp" />
+    <ClInclude Include="ManagedRewrite.h" />
+    <ClInclude Include="ManagedResources.h" />
+    <ClInclude Include="Features\IPatchFeature.hpp" />
+    <ClInclude Include="Features\PatchFeatureRegistry.hpp" />
+    <ClInclude Include="Features\DownloadPageLoaderFeature.hpp" />
+    <ClInclude Include="Features\ModpackPickerFeature.hpp" />
+    <ClInclude Include="Features\ModpackDispatcherFeature.hpp" />
+    <ClInclude Include="Features\ModifyMinecraftCardFeature.hpp" />
+    <ClInclude Include="Features\ResourceInstallFeature.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
